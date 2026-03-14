@@ -2,3 +2,5 @@ aws_secrets.json
 __pycache__/
 *.pkl
 .assistant
+*/file
+file
