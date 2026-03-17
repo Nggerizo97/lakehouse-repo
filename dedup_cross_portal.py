@@ -209,57 +209,58 @@ def find_cross_portal_matches(df_prepared: DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────
-# 4. COMPONENTES CONECTADOS (UNION-FIND EN SPARK)
+# 4. COMPONENTES CONECTADOS (UNION-FIND EN PYTHON — serverless-safe)
 # ─────────────────────────────────────────────────────────────────
+
+class _UnionFind:
+    """Lightweight Union-Find with path compression + union by rank."""
+    def __init__(self):
+        self.parent = {}
+        self.rank = {}
+
+    def find(self, x):
+        if x not in self.parent:
+            self.parent[x] = x
+            self.rank[x] = 0
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]  # path compression
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
+
 
 def assign_property_groups(df_prepared: DataFrame,
                            df_pairs: DataFrame) -> DataFrame:
-    df_nodes = (
-        df_prepared
-        .withColumn("node_id", F.concat_ws("||", F.col("fuente"), F.col("id_original")))
-        .select("node_id")
-        .distinct()
-    )
-
-    edges_ab = df_pairs.select(
+    # Collect edges to driver — typically <100K pairs, trivial for Python
+    edges = df_pairs.select(
         F.concat_ws("||", F.col("fuente_a"), F.col("id_a")).alias("src"),
         F.concat_ws("||", F.col("fuente_b"), F.col("id_b")).alias("dst"),
-    )
-    edges_ba = df_pairs.select(
-        F.concat_ws("||", F.col("fuente_b"), F.col("id_b")).alias("src"),
-        F.concat_ws("||", F.col("fuente_a"), F.col("id_a")).alias("dst"),
-    )
-    edges = edges_ab.union(edges_ba)
+    ).collect()
 
-    labels = df_nodes.withColumn("group_label", F.col("node_id"))
+    uf = _UnionFind()
+    for row in edges:
+        uf.union(row["src"], row["dst"])
 
-    MAX_ITER = 10
-    for i in range(MAX_ITER):
-        neighbor_labels = (
-            edges
-            .join(labels, edges.dst == labels.node_id, "inner")
-            .select(F.col("src").alias("node_id"), F.col("group_label").alias("neighbor_label"))
-        )
-        all_labels = (
-            labels.select("node_id", F.col("group_label").alias("neighbor_label"))
-            .union(neighbor_labels)
-        )
-        new_labels = all_labels.groupBy("node_id").agg(F.min("neighbor_label").alias("group_label"))
+    # Build mapping: node_id → group_label (root of its component)
+    group_map = {node: uf.find(node) for node in uf.parent}
+    mapping_rows = [(node, group) for node, group in group_map.items()]
 
-        changed = (
-            labels.alias("old")
-            .join(new_labels.alias("new"), "node_id")
-            .filter(F.col("old.group_label") != F.col("new.group_label"))
-            .count()
-        )
-        labels = new_labels
-        if changed == 0:
-            break
+    spark = df_prepared.sparkSession
+    df_labels = spark.createDataFrame(mapping_rows, ["node_id", "group_label"])
 
     return (
         df_prepared
         .withColumn("node_id", F.concat_ws("||", F.col("fuente"), F.col("id_original")))
-        .join(labels, "node_id", "left")
+        .join(df_labels, "node_id", "left")
         .withColumn("property_group_id", F.coalesce(F.col("group_label"), F.col("node_id")))
         .drop("node_id", "group_label")
     )
