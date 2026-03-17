@@ -14,6 +14,14 @@ import unicodedata
 import re
 
 
+def _safe_cache(df: DataFrame) -> DataFrame:
+    """Cache a DataFrame if the cluster supports it; no-op on serverless."""
+    try:
+        return df.cache()
+    except Exception:
+        return df
+
+
 # ─────────────────────────────────────────────────────────────────
 # 1. NORMALIZACIÓN DE UBICACIÓN
 # ─────────────────────────────────────────────────────────────────
@@ -397,13 +405,13 @@ def run_cross_portal_dedup(df_silver: DataFrame,
         location_sim_threshold=location_sim_threshold,
         max_price_ratio=max_price_ratio,
     )
-    df_pairs.cache()
+    df_pairs = _safe_cache(df_pairs)
     total_pairs = df_pairs.count()
     print(f"      → {total_pairs:,} pares identificados")
 
     print("\n[3/5] Asignando grupos (componentes conectados)...")
     df_grouped = assign_property_groups(df_prepared, df_pairs)
-    df_grouped.cache()
+    df_grouped = _safe_cache(df_grouped)
     n_groups = df_grouped.select("property_group_id").distinct().count()
     n_multi = (
         df_grouped.groupBy("property_group_id")
