@@ -63,8 +63,7 @@ def _extract_city_token(normalized_location):
     for city in ciudades:
         if city in normalized_location:
             return city
-    tokens = normalized_location.split()
-    return tokens[-1] if tokens else "unknown"
+    return "otra_ciudad"
 
 
 extract_city_udf = F.udf(_extract_city_token, StringType())
