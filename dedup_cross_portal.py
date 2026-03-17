@@ -79,6 +79,27 @@ def _location_tokens(normalized_location):
 location_tokens_udf = F.udf(_location_tokens, ArrayType(StringType()))
 
 
+def _normalizar_tipo(tipo_raw):
+    """396 variantes libres → 5 categorías limpias."""
+    if tipo_raw is None:
+        return "otro"
+    t = tipo_raw.lower().strip()
+    if any(x in t for x in ["apto", "apart", "piso", "estudio", "loft", "penthouse", "duplex"]):
+        return "apartamento"
+    if any(x in t for x in ["casa", "chalet", "villa", "finca", "cabana", "cabañ"]):
+        return "casa"
+    if any(x in t for x in ["oficin", "consultori"]):
+        return "oficina"
+    if any(x in t for x in ["local", "bodega", "comerci", "nave"]):
+        return "local_comercial"
+    if any(x in t for x in ["lote", "terreno", "parcela"]):
+        return "lote"
+    return "otro"
+
+
+normalizar_tipo_udf = F.udf(_normalizar_tipo, StringType())
+
+
 # ─────────────────────────────────────────────────────────────────
 # 2. PREPARACIÓN PARA MATCHING
 # ─────────────────────────────────────────────────────────────────
@@ -89,6 +110,7 @@ def prepare_for_matching(df_silver: DataFrame) -> DataFrame:
         .withColumn("ubicacion_norm", normalize_location_udf(F.col("ubicacion_raw")))
         .withColumn("city_token", extract_city_udf(F.col("ubicacion_norm")))
         .withColumn("location_tokens", location_tokens_udf(F.col("ubicacion_norm")))
+        .withColumn("tipo_inmueble", normalizar_tipo_udf(F.col("tipo_inmueble")))
         .withColumn("data_completeness",
             F.when(F.col("area_m2").isNotNull(), F.lit(1)).otherwise(F.lit(0)) +
             F.when(F.col("habitaciones").isNotNull(), F.lit(1)).otherwise(F.lit(0)) +
@@ -294,10 +316,8 @@ def select_ml_representative(df_grouped: DataFrame) -> DataFrame:
         .drop("_rank")
         .join(group_stats, "property_group_id", "left")
         .withColumn("precio_original_portal", F.col("precio_num"))
-        .withColumn("precio_num",
-            F.when(F.col("num_portales") > 1, F.col("precio_mediano_grupo"))
-            .otherwise(F.col("precio_num"))
-        )
+        # Keep the representative's real precio_num — don't overwrite with median.
+        # The median is available as precio_mediano_grupo for analysis.
     )
 
 
