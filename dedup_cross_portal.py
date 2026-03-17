@@ -127,7 +127,8 @@ def prepare_for_matching(df_silver: DataFrame) -> DataFrame:
 def find_cross_portal_matches(df_prepared: DataFrame,
                                area_tolerance: float = 0.10,
                                location_sim_threshold: float = 0.5,
-                               max_price_ratio: float = 1.25) -> DataFrame:
+                               max_price_ratio: float = 1.25,
+                               min_match_score: float = 0.80) -> DataFrame:
     a = df_prepared.alias("a")
     b = df_prepared.alias("b")
 
@@ -138,20 +139,20 @@ def find_cross_portal_matches(df_prepared: DataFrame,
         ], how="inner")
         .filter(
             (F.col("a.fuente") < F.col("b.fuente")) &
-            (F.col("a.area_m2").isNotNull() | F.col("b.area_m2").isNotNull())
+            # Require BOTH sides to have area — prevents false positives from
+            # incomplete records getting a default 0.5 area_sim score.
+            F.col("a.area_m2").isNotNull() &
+            F.col("b.area_m2").isNotNull()
         )
     )
 
-    # Filtro de área
+    # Filtro de área — both non-null guaranteed by the join filter above
     pairs = pairs.filter(
-        F.when(
-            F.col("a.area_m2").isNotNull() & F.col("b.area_m2").isNotNull(),
-            (F.abs(F.col("a.area_m2") - F.col("b.area_m2")) /
-             F.greatest(F.col("a.area_m2"), F.col("b.area_m2"))) <= area_tolerance
-        ).otherwise(F.lit(True))
+        (F.abs(F.col("a.area_m2") - F.col("b.area_m2")) /
+         F.greatest(F.col("a.area_m2"), F.col("b.area_m2"))) <= area_tolerance
     )
 
-    # Filtro de baños
+    # Filtro de baños — strict: if both present, must be close
     pairs = pairs.filter(
         F.when(
             F.col("a.banos").isNotNull() & F.col("b.banos").isNotNull(),
@@ -159,7 +160,7 @@ def find_cross_portal_matches(df_prepared: DataFrame,
         ).otherwise(F.lit(True))
     )
 
-    # Filtro de precio
+    # Filtro de precio — strict: if both present, must be within ratio
     pairs = pairs.filter(
         F.when(
             F.col("a.precio_num").isNotNull() & F.col("b.precio_num").isNotNull() &
@@ -184,15 +185,13 @@ def find_cross_portal_matches(df_prepared: DataFrame,
         .filter(F.col("jaccard_sim") >= location_sim_threshold)
     )
 
-    # Score compuesto
+    # Score compuesto — area_sim is always real (both non-null), price_sim
+    # defaults to 0.5 only when price is missing on either side.
     pairs_final = (
         pairs
         .withColumn("area_sim",
-            F.when(
-                F.col("a.area_m2").isNotNull() & F.col("b.area_m2").isNotNull(),
-                F.lit(1.0) - (F.abs(F.col("a.area_m2") - F.col("b.area_m2")) /
-                              F.greatest(F.col("a.area_m2"), F.col("b.area_m2")))
-            ).otherwise(F.lit(0.5))
+            F.lit(1.0) - (F.abs(F.col("a.area_m2") - F.col("b.area_m2")) /
+                          F.greatest(F.col("a.area_m2"), F.col("b.area_m2")))
         )
         .withColumn("price_sim",
             F.when(
@@ -223,7 +222,7 @@ def find_cross_portal_matches(df_prepared: DataFrame,
             F.col("price_sim"),
             F.col("match_score"),
         )
-        .filter(F.col("match_score") >= 0.60)
+        .filter(F.col("match_score") >= min_match_score)
     )
 
     return pairs_final
@@ -260,16 +259,48 @@ class _UnionFind:
 
 
 def assign_property_groups(df_prepared: DataFrame,
-                           df_pairs: DataFrame) -> DataFrame:
+                           df_pairs: DataFrame,
+                           max_group_size: int = 9) -> DataFrame:
+    """Assign each record to a property group using Union-Find on matched pairs.
+    
+    Groups larger than max_group_size are broken apart by re-running Union-Find
+    on only the top-scoring edges, keeping at most max_group_size-1 edges per
+    component.
+    """
     # Collect edges to driver — typically <100K pairs, trivial for Python
     edges = df_pairs.select(
         F.concat_ws("||", F.col("fuente_a"), F.col("id_a")).alias("src"),
         F.concat_ws("||", F.col("fuente_b"), F.col("id_b")).alias("dst"),
+        F.col("match_score").alias("score"),
     ).collect()
 
+    # Sort edges by score descending — highest confidence first
+    edges_sorted = sorted(edges, key=lambda r: r["score"], reverse=True)
+
     uf = _UnionFind()
-    for row in edges:
-        uf.union(row["src"], row["dst"])
+    group_sizes = {}  # root -> current size
+
+    for row in edges_sorted:
+        src, dst = row["src"], row["dst"]
+        root_s = uf.find(src)
+        root_d = uf.find(dst)
+
+        if root_s == root_d:
+            continue  # already connected
+
+        size_s = group_sizes.get(root_s, 1)
+        size_d = group_sizes.get(root_d, 1)
+
+        if size_s + size_d > max_group_size:
+            continue  # skip — would create oversized group
+
+        uf.union(src, dst)
+        new_root = uf.find(src)
+        group_sizes[new_root] = size_s + size_d
+        # Clean up old roots
+        for old_root in (root_s, root_d):
+            if old_root != new_root and old_root in group_sizes:
+                del group_sizes[old_root]
 
     # Build mapping: node_id → group_label (root of its component)
     group_map = {node: uf.find(node) for node in uf.parent}
@@ -407,7 +438,9 @@ def build_price_intelligence(df_grouped: DataFrame):
 def run_cross_portal_dedup(df_silver: DataFrame,
                            area_tolerance: float = 0.10,
                            location_sim_threshold: float = 0.50,
-                           max_price_ratio: float = 1.25):
+                           max_price_ratio: float = 1.25,
+                           min_match_score: float = 0.80,
+                           max_group_size: int = 9):
     print("=" * 65)
     print("  DEDUP CROSS-PORTAL — Inicio")
     print("=" * 65)
@@ -424,13 +457,14 @@ def run_cross_portal_dedup(df_silver: DataFrame,
         area_tolerance=area_tolerance,
         location_sim_threshold=location_sim_threshold,
         max_price_ratio=max_price_ratio,
+        min_match_score=min_match_score,
     )
     df_pairs = _safe_cache(df_pairs)
     total_pairs = df_pairs.count()
     print(f"      → {total_pairs:,} pares identificados")
 
     print("\n[3/5] Asignando grupos (componentes conectados)...")
-    df_grouped = assign_property_groups(df_prepared, df_pairs)
+    df_grouped = assign_property_groups(df_prepared, df_pairs, max_group_size=max_group_size)
     df_grouped = _safe_cache(df_grouped)
     n_groups = df_grouped.select("property_group_id").distinct().count()
     n_multi = (
