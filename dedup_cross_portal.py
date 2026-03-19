@@ -318,33 +318,81 @@ def assign_property_groups(df_prepared: DataFrame,
     )
 
 
+def _latest_portal_snapshot(df_grouped: DataFrame) -> DataFrame:
+    """Keep a single record per (property_group_id, fuente) to avoid mixing
+    historical snapshots from the same portal when building downstream stats."""
+    w_portal = Window.partitionBy("property_group_id", "fuente").orderBy(
+        F.desc("fecha_extraccion"),
+        F.desc("data_completeness"),
+    )
+    return (
+        df_grouped
+        .withColumn("_portal_rank", F.row_number().over(w_portal))
+        .filter(F.col("_portal_rank") == 1)
+        .drop("_portal_rank")
+    )
+
+
 # ─────────────────────────────────────────────────────────────────
 # 5. SELECCIÓN DE REPRESENTANTE PARA ML
 # ─────────────────────────────────────────────────────────────────
 
 def select_ml_representative(df_grouped: DataFrame) -> DataFrame:
+    df_latest = _latest_portal_snapshot(df_grouped)
+
     group_stats = (
-        df_grouped
+        df_latest
         .groupBy("property_group_id")
         .agg(
-            F.count("*").alias("num_portales"),
+            F.countDistinct("fuente").alias("num_portales"),
             F.collect_set("fuente").alias("portales"),
             F.expr("percentile_approx(precio_num, 0.5)").alias("precio_mediano_grupo"),
             F.min("precio_num").alias("precio_min_grupo"),
             F.max("precio_num").alias("precio_max_grupo"),
+            F.round(F.stddev("precio_num"), 0).alias("precio_std_grupo"),
+        )
+        .withColumn(
+            "dispersion_pct_grupo",
+            F.when(
+                F.col("precio_mediano_grupo").isNotNull() & (F.col("precio_mediano_grupo") > 0),
+                F.round(
+                    (F.col("precio_max_grupo") - F.col("precio_min_grupo")) /
+                    F.col("precio_mediano_grupo") * 100,
+                    1,
+                ),
+            ),
+        )
+    )
+
+    df_candidates = (
+        df_latest
+        .join(group_stats, "property_group_id", "left")
+        .withColumn(
+            "precio_desviacion_grupo_pct",
+            F.when(
+                F.col("precio_num").isNotNull() &
+                F.col("precio_mediano_grupo").isNotNull() &
+                (F.col("precio_mediano_grupo") > 0),
+                F.round(
+                    F.abs(F.col("precio_num") - F.col("precio_mediano_grupo")) /
+                    F.col("precio_mediano_grupo") * 100,
+                    1,
+                ),
+            ).otherwise(F.lit(9999.0))
         )
     )
 
     w = Window.partitionBy("property_group_id").orderBy(
-        F.desc("data_completeness"), F.desc("fecha_extraccion")
+        F.asc("precio_desviacion_grupo_pct"),
+        F.desc("data_completeness"),
+        F.desc("fecha_extraccion"),
     )
 
     return (
-        df_grouped
+        df_candidates
         .withColumn("_rank", F.row_number().over(w))
         .filter(F.col("_rank") == 1)
         .drop("_rank")
-        .join(group_stats, "property_group_id", "left")
         .withColumn("precio_original_portal", F.col("precio_num"))
         # Keep the representative's real precio_num — don't overwrite with median.
         # The median is available as precio_mediano_grupo for analysis.
@@ -356,23 +404,28 @@ def select_ml_representative(df_grouped: DataFrame) -> DataFrame:
 # ─────────────────────────────────────────────────────────────────
 
 def build_price_intelligence(df_grouped: DataFrame):
+    df_latest = _latest_portal_snapshot(df_grouped)
+    df_priced = df_latest.filter(F.col("precio_num").isNotNull() & (F.col("precio_num") > 0))
+
     multi_portal = (
-        df_grouped
+        df_priced
         .groupBy("property_group_id")
         .agg(F.countDistinct("fuente").alias("n_portales"))
         .filter(F.col("n_portales") > 1)
         .select("property_group_id")
     )
 
-    df_multi = df_grouped.join(multi_portal, "property_group_id", "inner")
+    df_multi = df_priced.join(multi_portal, "property_group_id", "inner")
 
-    df_prices_by_portal = df_multi.select("property_group_id", "fuente", "precio_num", "url")
+    df_prices_by_portal = df_multi.select(
+        "property_group_id", "fuente", "precio_num", "url", "fecha_extraccion", "data_completeness"
+    )
 
     group_intelligence = (
         df_multi
         .groupBy("property_group_id")
         .agg(
-            F.count("*").alias("num_portales"),
+            F.countDistinct("fuente").alias("num_portales"),
             F.collect_set("fuente").alias("portales_disponibles"),
             F.min("precio_num").alias("precio_minimo"),
             F.max("precio_num").alias("precio_maximo"),
@@ -382,6 +435,23 @@ def build_price_intelligence(df_grouped: DataFrame):
         .withColumn("ahorro_potencial", F.col("precio_maximo") - F.col("precio_minimo"))
         .withColumn("ahorro_pct",
             F.round((F.col("precio_maximo") - F.col("precio_minimo")) / F.col("precio_maximo") * 100, 1))
+        .withColumn(
+            "dispersion_pct",
+            F.when(
+                F.col("precio_mediano").isNotNull() & (F.col("precio_mediano") > 0),
+                F.round(
+                    (F.col("precio_maximo") - F.col("precio_minimo")) /
+                    F.col("precio_mediano") * 100,
+                    1,
+                ),
+            ),
+        )
+        .withColumn(
+            "confianza_oportunidad",
+            F.when((F.col("num_portales") >= 3) & (F.col("dispersion_pct") <= 15), F.lit("alta"))
+             .when((F.col("num_portales") >= 2) & (F.col("dispersion_pct") <= 25), F.lit("media"))
+             .otherwise(F.lit("baja"))
+        )
     )
 
     w_min = Window.partitionBy("property_group_id").orderBy(F.asc("precio_num"))
@@ -407,10 +477,12 @@ def build_price_intelligence(df_grouped: DataFrame):
         F.desc("data_completeness"), F.desc("fecha_extraccion")
     )
     representative_info = (
-        df_multi.withColumn("_r", F.row_number().over(w_best)).filter(F.col("_r") == 1)
+        df_latest.join(multi_portal, "property_group_id", "inner")
+        .withColumn("_r", F.row_number().over(w_best)).filter(F.col("_r") == 1)
         .select("property_group_id",
                 F.col("titulo").alias("titulo_inmueble"),
-                "ubicacion_raw", "area_m2", "habitaciones", "banos",
+                "ubicacion_raw", "ubicacion_norm", "city_token",
+                "area_m2", "habitaciones", "banos",
                 "garajes", "tipo_inmueble", "estado_inmueble")
     )
 
@@ -424,7 +496,7 @@ def build_price_intelligence(df_grouped: DataFrame):
 
     df_detail = (
         df_prices_by_portal
-        .select("property_group_id", "fuente", "precio_num", "url")
+        .select("property_group_id", "fuente", "precio_num", "url", "fecha_extraccion", "data_completeness")
         .orderBy("property_group_id", "precio_num")
     )
 
