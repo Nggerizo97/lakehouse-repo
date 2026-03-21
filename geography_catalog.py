@@ -51,9 +51,89 @@ CITY_CATALOG = {
     "piedecuesta": {"aliases": ["piedecuesta"], "department": "santander", "region": "andina"},
 }
 
+MARKET_CATALOG = {
+    "bogota_metropolitana": [
+        "bogota",
+        "soacha",
+        "chia",
+        "zipaquira",
+        "cajica",
+        "cota",
+        "funza",
+        "mosquera",
+        "tocancipa",
+        "la calera",
+        "sopo",
+        "girardot",
+    ],
+    "valle_aburra": [
+        "medellin",
+        "envigado",
+        "sabaneta",
+        "itagui",
+        "bello",
+    ],
+    "oriente_antioqueno": [
+        "rionegro",
+    ],
+    "cali_metropolitana": [
+        "cali",
+    ],
+    "barranquilla_metropolitana": [
+        "barranquilla",
+    ],
+    "cartagena_metropolitana": [
+        "cartagena",
+    ],
+    "bucaramanga_metropolitana": [
+        "bucaramanga",
+        "floridablanca",
+        "piedecuesta",
+    ],
+    "eje_cafetero": [
+        "pereira",
+        "manizales",
+        "armenia",
+    ],
+    "cucuta_metropolitana": [
+        "cucuta",
+    ],
+    "santa_marta_metropolitana": [
+        "santa marta",
+    ],
+    "villavicencio_metropolitana": [
+        "villavicencio",
+    ],
+    "pasto_metropolitana": [
+        "pasto",
+    ],
+    "monteria_metropolitana": [
+        "monteria",
+    ],
+    "neiva_metropolitana": [
+        "neiva",
+    ],
+    "popayan_metropolitana": [
+        "popayan",
+    ],
+    "valledupar_metropolitana": [
+        "valledupar",
+    ],
+    "sincelejo_metropolitana": [
+        "sincelejo",
+    ],
+    "tunja_metropolitana": [
+        "tunja",
+    ],
+    "ibague_metropolitana": [
+        "ibague",
+    ],
+}
+
 CITY_ALIAS_TO_CANONICAL = {}
 CITY_TO_DEPARTMENT = {}
 CITY_TO_REGION = {}
+CITY_TO_MARKET = {}
 
 for canonical_city, payload in CITY_CATALOG.items():
     CITY_ALIAS_TO_CANONICAL[canonical_city] = canonical_city
@@ -61,5 +141,9 @@ for canonical_city, payload in CITY_CATALOG.items():
     CITY_TO_REGION[canonical_city] = payload["region"]
     for alias in payload.get("aliases", []):
         CITY_ALIAS_TO_CANONICAL[alias] = canonical_city
+
+for market_token, cities in MARKET_CATALOG.items():
+    for canonical_city in cities:
+        CITY_TO_MARKET[canonical_city] = market_token
 
 SORTED_CITY_ALIASES = sorted(CITY_ALIAS_TO_CANONICAL.keys(), key=len, reverse=True)

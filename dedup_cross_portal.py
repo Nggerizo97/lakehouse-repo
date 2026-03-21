@@ -13,6 +13,13 @@ from pyspark.sql.types import StringType, ArrayType
 import unicodedata
 import re
 
+try:
+    from geography_catalog import CITY_ALIAS_TO_CANONICAL, CITY_TO_MARKET, SORTED_CITY_ALIASES
+except Exception:
+    CITY_ALIAS_TO_CANONICAL = {}
+    CITY_TO_MARKET = {}
+    SORTED_CITY_ALIASES = []
+
 
 def _safe_cache(df: DataFrame) -> DataFrame:
     """Cache a DataFrame if the cluster supports it; no-op on serverless."""
@@ -49,7 +56,14 @@ normalize_location_udf = F.udf(_normalize_location, StringType())
 
 def _extract_city_token(normalized_location):
     if normalized_location is None:
-        return "unknown"
+        return "otra_ciudad"
+
+    text = f" {normalized_location.strip()} "
+    for alias in SORTED_CITY_ALIASES:
+        if f" {alias} " in text:
+            return CITY_ALIAS_TO_CANONICAL.get(alias, alias)
+
+    # Fallback defensivo si no se pudo cargar el catálogo externo.
     ciudades = {
         "bogota", "medellin", "cali", "barranquilla", "cartagena",
         "bucaramanga", "pereira", "manizales", "cucuta", "ibague",
@@ -67,6 +81,15 @@ def _extract_city_token(normalized_location):
 
 
 extract_city_udf = F.udf(_extract_city_token, StringType())
+
+
+def _map_city_market(city_token):
+    if city_token is None:
+        return "mercado_otro"
+    return CITY_TO_MARKET.get(city_token, "mercado_otro")
+
+
+map_city_market_udf = F.udf(_map_city_market, StringType())
 
 
 def _location_tokens(normalized_location):
@@ -107,7 +130,20 @@ def prepare_for_matching(df_silver: DataFrame) -> DataFrame:
     return (
         df_silver
         .withColumn("ubicacion_norm", normalize_location_udf(F.col("ubicacion_raw")))
-        .withColumn("city_token", extract_city_udf(F.col("ubicacion_norm")))
+        .withColumn(
+            "city_token",
+            F.when(
+                F.col("city_token").isNotNull() & (F.length(F.trim(F.col("city_token"))) > 0),
+                F.col("city_token")
+            ).otherwise(extract_city_udf(F.col("ubicacion_norm")))
+        )
+        .withColumn(
+            "market_token",
+            F.when(
+                F.col("market_token").isNotNull() & (F.length(F.trim(F.col("market_token"))) > 0),
+                F.col("market_token")
+            ).otherwise(map_city_market_udf(F.col("city_token")))
+        )
         .withColumn("location_tokens", location_tokens_udf(F.col("ubicacion_norm")))
         .withColumn("tipo_inmueble", normalizar_tipo_udf(F.col("tipo_inmueble")))
         .withColumn("data_completeness",
@@ -481,7 +517,7 @@ def build_price_intelligence(df_grouped: DataFrame):
         .withColumn("_r", F.row_number().over(w_best)).filter(F.col("_r") == 1)
         .select("property_group_id",
                 F.col("titulo").alias("titulo_inmueble"),
-                "ubicacion_raw", "ubicacion_norm", "city_token",
+                "ubicacion_raw", "ubicacion_norm", "city_token", "market_token",
                 "area_m2", "habitaciones", "banos",
                 "garajes", "tipo_inmueble", "estado_inmueble")
     )
