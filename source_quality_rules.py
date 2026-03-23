@@ -4,6 +4,8 @@ Mantiene fuera del notebook los thresholds operativos de validacion
 y las senales minimas esperadas por portal.
 """
 
+DEFAULT_PRICE_RULES = {"min_price": 20_000_000, "max_price": 20_000_000_000}
+
 SOURCE_PRICE_RULES = {
     "bancolombia_tu360": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "ciencuadras": {"min_price": 20_000_000, "max_price": 20_000_000_000},
