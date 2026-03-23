@@ -1,9 +1,27 @@
+## Secretos y credenciales
 aws_secrets.json
-__pycache__/
-*.pkl
-.assistant
-*/file
-file
+
+## Entornos virtuales y dependencias
 .venv/
 venv/
-local_s3_dump
+__pycache__/
+*.pyc
+*.pyo
+*.pkl
+.lock
+
+## Datos locales y dumps
+file/
+local_s3_dump/
+*.parquet
+
+## Archivos temporales y de asistente
+.assistant
+
+## Otros
+.DS_Store
+Thumbs.db
+gold_cell_0.py
+gold_cell_1.py
+inspect_bronze.py
+local_analytics.py
