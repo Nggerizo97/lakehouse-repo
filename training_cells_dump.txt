@@ -1,0 +1,966 @@
+Total cells: 2
+
+================ CELL 1 ================
+"""
+04_Train_Model_v8.py — Notebook de entrenamiento unificado
+===========================================================
+Consolida las 4 celdas anteriores en un único entrenamiento:
+  - Lee Gold app_inmuebles/ (tiene comunas+sectores+market_token calculados por Spark)
+  - market_token como feature categórica (no recalcula, viene del Gold)
+  - portal ops weighting integrado (no re-entrena, ajusta pesos antes del split)
+  - amenity regex corregido (\\b → r"\b")
+  - sample_weight calculado sobre df_clean con índices alineados
+  - bundle_v8 con todos los stats + trazabilidad de fuente
+"""
+
+import pandas as pd
+import numpy as np
+import pickle
+import boto3
+import json
+import re
+import time
+import unicodedata
+from io import BytesIO
+from datetime import datetime, timezone
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, r2_score
+from xgboost import XGBRegressor
+
+# ── Control de promoción ──────────────────────────────────────────
+AUTO_PROMOTE_IF_BETTER        = True
+FORCE_PROMOTE_TO_CHAMPION     = False
+USE_HISTORY_FEATURES          = True
+HISTORY_MIN_REPEATED_SHARE    = 1.0
+
+# =============================================================
+# 1. CONFIG Y CARGA
+# =============================================================
+try:
+    config = {
+        "aws_access_key": dbutils.secrets.get(scope="aws", key="access_key"),
+        "aws_secret_key": dbutils.secrets.get(scope="aws", key="secret_key"),
+        "bucket_name": "bronce-scrap-date",
+    }
+except Exception:
+    with open("aws_secrets.json", "r") as f:
+        config = json.load(f)
+
+BUCKET = config["bucket_name"]
+
+# SIN fs.s3a.impl — no compatible con Databricks Serverless
+S3_OPTS = {
+    "fs.s3a.access.key": config["aws_access_key"],
+    "fs.s3a.secret.key": config["aws_secret_key"],
+    "fs.s3a.endpoint":   "s3.amazonaws.com",
+}
+
+# Prioridad de fuente de training:
+# 1. Gold app_inmuebles (tiene comunas+sectores+market_token del pipeline Spark)
+# 2. Silver master_deduped (fallback — requiere recalcular geo en Python)
+GOLD_PATH    = f"s3a://{BUCKET}/gold/app_inmuebles/"
+SILVER_PATH  = f"s3a://{BUCKET}/silver/master_deduped/"
+HISTORY_PATH = f"s3a://{BUCKET}/silver/master_inmuebles/"
+PORTAL_OPS_PATH = f"s3a://{BUCKET}/gold/portal_operacion/"
+
+def summarize_spark_exception(exc):
+    msg = re.sub(r"\s+", " ", str(exc)).strip()
+    for tok in ["JVM stacktrace:", "Caused by:", "Trace ID:"]:
+        if tok in msg:
+            msg = msg.split(tok, 1)[0].strip()
+    return msg[:280] + ("..." if len(msg) > 280 else "")
+
+def load_spark_path(path, formats):
+    last_error = None
+    for fmt in formats:
+        try:
+            reader = spark.read.format(fmt)
+            for k, v in S3_OPTS.items():
+                reader = reader.option(k, v)
+            return reader.load(path), fmt
+        except Exception as exc:
+            last_error = exc
+    raise last_error
+
+# ── Cargar datos de entrenamiento ────────────────────────────────
+training_source = "gold"
+try:
+    df_spark, fmt = load_spark_path(GOLD_PATH, ["parquet", "delta"])
+    print(f"✅ Leyendo Gold ({fmt.upper()}): {GOLD_PATH}")
+except Exception as e:
+    print(f"⚠️ Gold no disponible ({summarize_spark_exception(e)}), usando Silver Deduped")
+    df_spark, fmt = load_spark_path(SILVER_PATH, ["delta"])
+    training_source = "silver"
+    print(f"✅ Leyendo Silver Deduped (delta): {SILVER_PATH}")
+
+available = set(df_spark.columns)
+GEO_COLS = ["comuna_mercado", "sector_mercado", "market_token", "zona_mercado"]
+geo_present = [c for c in GEO_COLS if c in available]
+geo_missing  = [c for c in GEO_COLS if c not in available]
+print(f"   Columnas geo del Gold presentes: {geo_present}")
+if geo_missing:
+    print(f"   ⚠️ Ausentes (se recalcularán): {geo_missing}")
+
+# ── Cargar historial ─────────────────────────────────────────────
+df_history_spark = None
+history_read_enabled = USE_HISTORY_FEATURES
+if history_read_enabled:
+    try:
+        df_history_spark, hfmt = load_spark_path(HISTORY_PATH, ["delta", "parquet"])
+        print(f"🕒 Historial ({hfmt.upper()}): {HISTORY_PATH}")
+    except Exception as e:
+        history_read_enabled = False
+        print(f"⚠️ Historial deshabilitado: {summarize_spark_exception(e)}")
+
+# ── Cargar portal ops ────────────────────────────────────────────
+portal_ops = pd.DataFrame()
+try:
+    df_portal_ops_spark, pfmt = load_spark_path(PORTAL_OPS_PATH, ["delta", "parquet"])
+    portal_cols = [c for c in [
+        "portal", "checkpoint_activo", "checkpoint_age_hours",
+        "portal_ofertas_activas", "pct_multiportal_portal",
+        "dispersion_promedio_portal_pct", "portal_health_score",
+    ] if c in set(df_portal_ops_spark.columns)]
+    portal_ops = df_portal_ops_spark.select(*portal_cols).toPandas()
+    portal_ops["portal"] = portal_ops["portal"].fillna("").astype(str).str.strip().str.lower()
+    for col in portal_cols[1:]:
+        portal_ops[col] = pd.to_numeric(portal_ops[col], errors="coerce")
+    print(f"🛰️ Portal ops ({pfmt.upper()}): {len(portal_ops)} portales")
+except Exception as e:
+    print(f"ℹ️ Portal ops no disponible: {summarize_spark_exception(e)}")
+
+# =============================================================
+# 2. PREPARAR FEATURES BASE
+# =============================================================
+base_numeric_candidates = [
+    "area_m2", "habitaciones", "banos", "garajes",
+    "num_portales", "dispersion_pct_grupo", "precio_desviacion_grupo_pct",
+    "data_completeness",
+]
+cols_numeric_base_raw = [c for c in base_numeric_candidates if c in available]
+
+# Columnas geo — del Gold si existen, sino se recalculan más abajo
+geo_cat_candidates = ["tipo_inmueble", "estado_inmueble", "fuente", "city_token",
+                       "comuna_mercado", "sector_mercado", "market_token"]
+cols_text_candidates = ["ubicacion_norm", "zona_mercado", "ubicacion_raw", "titulo"]
+cols_text = [c for c in cols_text_candidates if c in available]
+aux_cols = [c for c in ["property_group_id", "id_original", "fecha_extraccion",
+                          "url", "batch_id", "source_file"] if c in available]
+
+all_cols = list(dict.fromkeys(
+    ["precio_num"] + cols_numeric_base_raw +
+    [c for c in geo_cat_candidates if c in available] +
+    cols_text + aux_cols
+))
+
+df = df_spark.select(*all_cols).toPandas()
+print(f"   Total registros: {len(df):,}")
+
+for col in cols_numeric_base_raw + ["precio_num"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+if "fecha_extraccion" in df.columns:
+    df["fecha_extraccion"] = pd.to_datetime(df["fecha_extraccion"], errors="coerce")
+for col in [c for c in geo_cat_candidates if c in df.columns] + cols_text + ["id_original", "url", "batch_id"]:
+    if col in df.columns:
+        df[col] = df[col].fillna("").astype(str)
+
+# ── Normalización de texto ───────────────────────────────────────
+def normalize_text(value):
+    text = "" if pd.isna(value) else str(value)
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"\|.*", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def normalize_url(value):
+    text = "" if pd.isna(value) else str(value).strip().lower()
+    text = re.sub(r"\?.*$", "", text)
+    return re.sub(r"/$", "", text)
+
+def build_listing_key(frame):
+    fuente_part = frame.get("fuente", pd.Series("desconocido", index=frame.index)).fillna("desconocido").astype(str)
+    id_part     = frame["id_original"].fillna("").astype(str).str.strip() if "id_original" in frame.columns else pd.Series("", index=frame.index)
+    url_part    = frame["url"].fillna("").astype(str).apply(normalize_url) if "url" in frame.columns else pd.Series("", index=frame.index)
+    group_part  = frame["property_group_id"].fillna("").astype(str).str.strip() if "property_group_id" in frame.columns else pd.Series("", index=frame.index)
+    return pd.Series(np.where(
+        id_part.ne(""),    fuente_part + "__id__"  + id_part,
+        np.where(url_part.ne(""),  fuente_part + "__url__" + url_part,
+        np.where(group_part.ne(""), "group__" + group_part, ""))
+    ), index=frame.index)
+
+# ── Defaults para columnas faltantes ────────────────────────────
+for col, default in [("city_token","otra_ciudad"),("tipo_inmueble","otro"),
+                      ("fuente","desconocido"),("estado_inmueble","desconocido")]:
+    if col not in df.columns:
+        df[col] = default
+
+tipos_validos = df["tipo_inmueble"].value_counts()
+df["tipo_inmueble"] = df["tipo_inmueble"].where(
+    df["tipo_inmueble"].isin(tipos_validos[tipos_validos >= 40].index), other="otro"
+)
+
+# ── Texto unificado ──────────────────────────────────────────────
+text_parts = [df[c].fillna("") for c in cols_text if c in df.columns]
+df["texto_completo"] = text_parts[0] if text_parts else pd.Series("", index=df.index)
+for part in text_parts[1:]:
+    df["texto_completo"] = df["texto_completo"] + " " + part
+
+# ── Geo: usar Gold si está presente, sino recalcular ────────────
+CITY_ALIAS_TO_TOKEN = {
+    "bogota":        ["bogota", "bogota dc", "bogota d c", "bogota distrito capital"],
+    "medellin":      ["medellin", "medallo"],
+    "cali":          ["cali", "santiago de cali"],
+    "barranquilla":  ["barranquilla", "bquilla"],
+    "cartagena":     ["cartagena", "cartagena de indias"],
+    "bucaramanga":   ["bucaramanga"],
+    "pereira":       ["pereira"],
+    "manizales":     ["manizales"],
+    "cucuta":        ["cucuta", "san jose de cucuta"],
+    "santa marta":   ["santa marta"],
+}
+CITY_ALIAS_TOKENS = {
+    tok for aliases in CITY_ALIAS_TO_TOKEN.values()
+    for alias in aliases for tok in alias.split()
+}
+CITY_ALIAS_TOKENS.update(CITY_ALIAS_TO_TOKEN.keys())
+
+CIUDAD_A_MARKET = {
+    "bogota": "bogota_metropolitana",    "soacha": "bogota_metropolitana",
+    "chia": "bogota_metropolitana",      "cajica": "bogota_metropolitana",
+    "zipaquira": "bogota_metropolitana", "cota": "bogota_metropolitana",
+    "mosquera": "bogota_metropolitana",  "la calera": "bogota_metropolitana",
+    "medellin": "valle_aburra",          "envigado": "valle_aburra",
+    "sabaneta": "valle_aburra",          "itagui": "valle_aburra",
+    "bello": "valle_aburra",
+    "rionegro": "oriente_antioqueno",
+    "cali": "cali_metropolitana",
+    "barranquilla": "barranquilla_metropolitana",
+    "cartagena": "cartagena_metropolitana",
+    "bucaramanga": "bucaramanga_metropolitana",
+    "floridablanca": "bucaramanga_metropolitana",
+    "pereira": "eje_cafetero",           "manizales": "eje_cafetero",
+    "armenia": "eje_cafetero",
+    "santa marta": "santa_marta_metropolitana",
+    "cucuta": "cucuta_metropolitana",
+    "ibague": "ibague_metropolitana",
+}
+
+def canonicalize_city(raw):
+    val = normalize_text(raw)
+    if not val or val == "otra_ciudad":
+        return "otra_ciudad"
+    for token, aliases in CITY_ALIAS_TO_TOKEN.items():
+        if val == token or any(a in val for a in aliases):
+            return token
+    return val
+
+ubicacion_col = next((c for c in ["ubicacion_norm", "zona_mercado", "ubicacion_raw"] if c in df.columns), None)
+df["ubicacion_limpia"] = df[ubicacion_col].apply(normalize_text) if ubicacion_col else ""
+
+# city_token: normalizar aunque venga del Gold (puede tener variantes)
+df["city_token"] = df["city_token"].apply(canonicalize_city)
+conteos = df["city_token"].value_counts()
+df["city_token"] = df["city_token"].where(
+    df["city_token"].isin(conteos[conteos >= 80].index), other="otra_ciudad"
+)
+print(f"   city_token: {df['city_token'].nunique()} categorías")
+
+# market_token: del Gold si existe, sino derivar
+if "market_token" in df.columns and df["market_token"].ne("").any():
+    mkt_counts = df["market_token"].value_counts()
+    df["market_token"] = df["market_token"].where(
+        df["market_token"].isin(mkt_counts[mkt_counts >= 50].index), other="mercado_otro"
+    )
+    print(f"   market_token del Gold: {df['market_token'].nunique()} categorías")
+else:
+    df["market_token"] = df["city_token"].map(CIUDAD_A_MARKET).fillna("mercado_otro")
+    print(f"   market_token derivado de city_token: {df['market_token'].nunique()} categorías")
+
+# comunas y sectores: del Gold si existen
+import sys
+import os
+if os.getcwd() not in sys.path:
+    sys.path.insert(0, os.getcwd())
+from src.geo.sector_mapping import assign_comuna as assign_comuna_py, extract_sector_mercado as extract_sector_py
+
+if "comuna_mercado" not in df.columns or df["comuna_mercado"].eq("").all():
+    df["comuna_mercado"] = [assign_comuna_py(c, u) for c, u in zip(df["city_token"], df["ubicacion_limpia"])]
+    # colapsar
+    com_counts = df["comuna_mercado"].value_counts()
+    df["comuna_mercado"] = df["comuna_mercado"].where(
+        df["comuna_mercado"].isin(com_counts[com_counts >= 25].index), other="comuna_otra"
+    )
+    print(f"   comuna_mercado recalculada: {df['comuna_mercado'].nunique()} categorías")
+else:
+    com_counts = df["comuna_mercado"].value_counts()
+    df["comuna_mercado"] = df["comuna_mercado"].where(
+        df["comuna_mercado"].isin(com_counts[com_counts >= 15].index), other="comuna_otra"
+    )
+    print(f"   comuna_mercado del Gold: {df['comuna_mercado'].nunique()} categorías")
+
+if "sector_mercado" not in df.columns or df["sector_mercado"].eq("").all():
+    df["sector_mercado_raw"] = [extract_sector_py(c, com, u)
+                                 for c, com, u in zip(df["city_token"], df["comuna_mercado"], df["ubicacion_limpia"])]
+    sc = df.groupby(["city_token","sector_mercado_raw"]).size().reset_index(name="sn")
+    df = df.merge(sc, on=["city_token","sector_mercado_raw"], how="left")
+    df["sector_mercado"] = np.where(
+        df["sn"].fillna(0) >= 12, df["sector_mercado_raw"],
+        np.where(df["comuna_mercado"].ne("comuna_otra"), df["comuna_mercado"], "sector_otra")
+    )
+    df = df.drop(columns=["sector_mercado_raw","sn"], errors="ignore")
+    print(f"   sector_mercado recalculado: {df['sector_mercado'].nunique()} categorías")
+else:
+    sec_counts = df["sector_mercado"].value_counts()
+    df["sector_mercado"] = df["sector_mercado"].where(
+        df["sector_mercado"].isin(sec_counts[sec_counts >= 12].index), other="sector_otra"
+    )
+    print(f"   sector_mercado del Gold: {df['sector_mercado'].nunique()} categorías")
+
+df["listing_history_key"] = build_listing_key(df)
+
+# =============================================================
+# 3. FEATURES DE CONSENSO Y AMENITIES
+# =============================================================
+num_portales_n = df["num_portales"].fillna(1).clip(1, 4) if "num_portales" in df.columns else pd.Series(1.0, index=df.index)
+dispersion     = df["dispersion_pct_grupo"].fillna(50).clip(0, 100) if "dispersion_pct_grupo" in df.columns else pd.Series(50.0, index=df.index)
+desv           = df["precio_desviacion_grupo_pct"].fillna(50).clip(0, 100) if "precio_desviacion_grupo_pct" in df.columns else pd.Series(50.0, index=df.index)
+completeness   = df["data_completeness"].fillna(0.5) if "data_completeness" in df.columns else pd.Series(0.5, index=df.index)
+if completeness.max(skipna=True) > 1.5:
+    completeness = completeness / 100.0
+completeness = completeness.clip(0.0, 1.0)
+
+df["score_consenso_cross_portal"] = (
+    np.clip((num_portales_n - 1.0) / 3.0, 0, 1) * 35.0
+    + (1.0 - dispersion / 100.0) * 30.0
+    + (1.0 - desv / 100.0) * 20.0
+    + completeness * 15.0
+).clip(0.0, 100.0)
+
+# CORREGIDO: r"\b..." en lugar de "\\b..." (el doble backslash nunca matcheaba)
+AMENITY_PATTERNS = {
+    "amenity_balcon":     ["balcon", "balcony"],
+    "amenity_terraza":    ["terraza", "roof garden", "patio"],
+    "amenity_ascensor":   ["ascensor", "elevador"],
+    "amenity_deposito":   ["deposito", "bodega", "locker", "cuarto util"],
+    "amenity_estudio":    ["estudio", "biblioteca"],
+    "amenity_remodelado": ["remodelado", "renovado", "reformado", "para estrenar"],
+    "amenity_gimnasio":   ["gimnasio", "gym"],
+    "amenity_piscina":    ["piscina", "pool", "jacuzzi"],
+    "amenity_conjunto":   ["conjunto", "unidad cerrada", "urbanizacion cerrada"],
+    "amenity_vigilancia": ["vigilancia", "porteria", "seguridad"],
+    "amenity_vista":      ["vista panoramica", "vista al mar", "vista verde"],
+    "amenity_penthouse":  ["penthouse"],
+    "amenity_duplex":     ["duplex", "triplex"],
+    "amenity_amoblado":   ["amoblado", "full amoblado"],
+    "amenity_lujo":       ["lujo", "exclusivo", "premium", "alta valorizacion"],
+}
+text_signal = (df["texto_completo"].fillna("") + " " + df["ubicacion_limpia"].fillna("")).apply(normalize_text)
+amenity_feature_cols = []
+for fname, keywords in AMENITY_PATTERNS.items():
+    # r"\b" correcto — matchea word boundary real
+    pattern = r"\b(?:" + "|".join(re.escape(kw) for kw in keywords) + r")\b"
+    df[fname] = text_signal.str.contains(pattern, regex=True, na=False).astype(float)
+    amenity_feature_cols.append(fname)
+df["amenities_count"]  = df[amenity_feature_cols].sum(axis=1)
+df["amenity_lujo_score"] = df[["amenity_balcon","amenity_terraza","amenity_ascensor",
+                                 "amenity_gimnasio","amenity_piscina","amenity_vista","amenity_lujo"]].sum(axis=1)
+print(f"   amenities: cobertura media = {df['amenities_count'].gt(0).mean()*100:.1f}%")
+
+# =============================================================
+# 4. HISTORIAL
+# =============================================================
+history_feature_cols = [
+    "dias_en_mercado","republicaciones_count","num_repricings",
+    "descuento_desde_inicial_hist_pct","dias_desde_ultimo_repricing",
+    "n_observaciones_hist","n_batches_hist","n_urls_hist",
+]
+history_repeated_share = 0.0
+history_signal_enabled = False
+
+if USE_HISTORY_FEATURES and df_history_spark is not None:
+    h_available = set(df_history_spark.columns)
+    history_cols = [c for c in ["fuente","id_original","url","property_group_id",
+                                  "fecha_extraccion","precio_num","batch_id","source_file"]
+                    if c in h_available]
+    try:
+        ht0 = time.time()
+        hdf = df_history_spark.select(*history_cols).toPandas()
+        for col in ["fuente","id_original","url","property_group_id","batch_id","source_file"]:
+            if col in hdf.columns:
+                hdf[col] = hdf[col].fillna("").astype(str)
+        if "fecha_extraccion" in hdf.columns:
+            hdf["fecha_extraccion"] = pd.to_datetime(hdf["fecha_extraccion"], errors="coerce")
+        if "precio_num" in hdf.columns:
+            hdf["precio_num"] = pd.to_numeric(hdf["precio_num"], errors="coerce")
+        hdf["listing_history_key"] = build_listing_key(hdf)
+        hdf = hdf[hdf["listing_history_key"].ne("") & hdf["fecha_extraccion"].notna()].copy()
+        hdf = hdf.sort_values(["listing_history_key","fecha_extraccion"], kind="stable")
+
+        hcounts = hdf["listing_history_key"].value_counts()
+        history_repeated_share = float((hcounts > 1).mean() * 100) if len(hcounts) else 0.0
+        history_signal_enabled = history_repeated_share >= HISTORY_MIN_REPEATED_SHARE
+        print(f"   historial: {len(hdf):,} registros, {history_repeated_share:.1f}% con >1 obs")
+
+        if history_signal_enabled:
+            hbase = hdf.groupby("listing_history_key").agg(
+                first_date=("fecha_extraccion","min"),
+                last_date=("fecha_extraccion","max"),
+                n_observaciones_hist=("fecha_extraccion","size"),
+            ).reset_index()
+
+            hdf["gap_days"] = hdf.groupby("listing_history_key")["fecha_extraccion"].diff().dt.days
+            gap_stats = hdf.groupby("listing_history_key", as_index=False)["gap_days"].apply(
+                lambda x: (x > 45).sum()
+            ).rename(columns={"gap_days":"gap_count"})
+
+            url_stats = (hdf.assign(url_ne=hdf["url"].where(hdf["url"].ne("")))
+                         .groupby("listing_history_key")["url_ne"].nunique(dropna=True)
+                         .reset_index(name="n_urls_hist")) if "url" in hdf.columns else pd.DataFrame({"listing_history_key":hbase["listing_history_key"],"n_urls_hist":0})
+
+            batch_stats = (hdf.assign(batch_ne=hdf["batch_id"].where(hdf["batch_id"].ne("")))
+                           .groupby("listing_history_key")["batch_ne"].nunique(dropna=True)
+                           .reset_index(name="n_batches_hist")) if "batch_id" in hdf.columns else pd.DataFrame({"listing_history_key":hbase["listing_history_key"],"n_batches_hist":0})
+
+            # price events
+            pe = hdf.loc[hdf["precio_num"].notna(), ["listing_history_key","fecha_extraccion","precio_num"]].copy()
+            pe = pe.sort_values(["listing_history_key","fecha_extraccion","precio_num"], kind="stable")
+            pe["price_changed"] = pe["precio_num"].ne(pe.groupby("listing_history_key")["precio_num"].shift())
+            price_stats = pe.groupby("listing_history_key").agg(
+                changed_events=("price_changed","sum"), first_price=("precio_num","first")
+            ).reset_index()
+            price_stats["num_repricings"] = (price_stats["changed_events"] - 1).clip(lower=0)
+            last_reprice = (pe.loc[pe["price_changed"], ["listing_history_key","fecha_extraccion"]]
+                            .groupby("listing_history_key", as_index=False)["fecha_extraccion"].max()
+                            .rename(columns={"fecha_extraccion":"last_reprice_date"}))
+            pe["price_order"] = pe.groupby("listing_history_key").cumcount()
+            pe["price_count"] = pe.groupby("listing_history_key")["precio_num"].transform("size")
+            prev_price = pe.loc[(pe["price_count"]==1)|(pe["price_order"]==pe["price_count"]-2),
+                                  ["listing_history_key","precio_num"]].rename(columns={"precio_num":"prev_price"})
+            price_stats = price_stats.merge(last_reprice, on="listing_history_key", how="left")
+            price_stats = price_stats.merge(prev_price, on="listing_history_key", how="left")
+            price_stats["prev_price"] = price_stats["prev_price"].fillna(price_stats["first_price"])
+            price_stats = price_stats.drop(columns=["changed_events"], errors="ignore")
+
+            history_features = (hbase
+                .merge(gap_stats, on="listing_history_key", how="left")
+                .merge(url_stats, on="listing_history_key", how="left")
+                .merge(batch_stats, on="listing_history_key", how="left")
+                .merge(price_stats, on="listing_history_key", how="left")
+            )
+            history_features["gap_count"]               = history_features["gap_count"].fillna(0)
+            history_features["n_urls_hist"]             = history_features["n_urls_hist"].fillna(0)
+            history_features["n_batches_hist"]          = history_features["n_batches_hist"].fillna(0)
+            history_features["num_repricings"]          = history_features["num_repricings"].fillna(0)
+            history_features["republicaciones_count"]   = np.maximum(history_features["n_urls_hist"]-1, history_features["gap_count"]).clip(lower=0)
+            history_features["dias_en_mercado"]         = (history_features["last_date"] - history_features["first_date"]).dt.days.clip(lower=0)
+            history_features["last_reprice_date"]       = history_features["last_reprice_date"].fillna(history_features["last_date"])
+            history_features["dias_desde_ultimo_repricing"] = (history_features["last_date"] - history_features["last_reprice_date"]).dt.days.clip(lower=0)
+            history_features["descuento_desde_inicial_hist_pct"] = np.where(
+                history_features["first_price"].notna() & (history_features["first_price"]>0) & history_features["prev_price"].notna(),
+                ((history_features["prev_price"] / history_features["first_price"]) - 1.0) * 100.0, np.nan
+            )
+            history_features = history_features[["listing_history_key"] + history_feature_cols]
+            df = df.merge(history_features, on="listing_history_key", how="left")
+            print(f"   features históricas construidas en {time.time()-ht0:.1f}s")
+        else:
+            for col in history_feature_cols:
+                df[col] = np.nan
+    except Exception as e:
+        print(f"⚠️ Historial falló: {e}")
+        for col in history_feature_cols:
+            df[col] = np.nan
+else:
+    for col in history_feature_cols:
+        df[col] = np.nan
+
+for col in ["republicaciones_count","num_repricings","n_observaciones_hist","n_batches_hist","n_urls_hist"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+# =============================================================
+# 5. FILTRO OUTLIERS + SEGMENTOS
+# =============================================================
+df = df[(df["area_m2"] >= 20) & (df["area_m2"] <= 800) & (df["precio_num"] > 0)].copy()
+df["precio_m2"]             = df["precio_num"] / df["area_m2"]
+df["log_area_m2"]           = np.log1p(df["area_m2"])
+df["banos_por_habitacion"]  = (df["banos"] / df["habitaciones"].replace(0, np.nan)).replace([np.inf,-np.inf], np.nan)
+df["market_segment"]        = df["city_token"]     + "__" + df["tipo_inmueble"]
+df["micro_market_segment"]  = df["city_token"]     + "__" + df["tipo_inmueble"] + "__" + df["comuna_mercado"]
+df["sector_market_segment"] = df["city_token"]     + "__" + df["tipo_inmueble"] + "__" + df["sector_mercado"]
+df["dias_en_mercado"]                    = pd.to_numeric(df["dias_en_mercado"], errors="coerce").clip(0, 3650)
+df["dias_desde_ultimo_repricing"]        = pd.to_numeric(df["dias_desde_ultimo_repricing"], errors="coerce").clip(0, 3650)
+df["descuento_desde_inicial_hist_pct"]   = pd.to_numeric(df["descuento_desde_inicial_hist_pct"], errors="coerce").clip(-80, 80)
+
+seg_bounds = (df.groupby("micro_market_segment")
+              .agg(segment_n=("precio_m2","size"),
+                   pm2_p10=("precio_m2", lambda s: s.quantile(0.10)),
+                   pm2_p90=("precio_m2", lambda s: s.quantile(0.90))).reset_index())
+seg_bounds["pm2_iqr"]   = seg_bounds["pm2_p90"] - seg_bounds["pm2_p10"]
+seg_bounds["pm2_lower"] = (seg_bounds["pm2_p10"] - 1.5 * seg_bounds["pm2_iqr"]).clip(lower=0)
+seg_bounds["pm2_upper"] = seg_bounds["pm2_p90"] + 1.5 * seg_bounds["pm2_iqr"]
+dff = df.merge(seg_bounds[["micro_market_segment","segment_n","pm2_lower","pm2_upper"]], on="micro_market_segment", how="left")
+dff = dff[(dff["segment_n"] < 20) | dff["precio_m2"].between(dff["pm2_lower"], dff["pm2_upper"])]
+g02, g98 = dff["precio_m2"].quantile(0.02), dff["precio_m2"].quantile(0.98)
+df_clean = dff[dff["precio_m2"].between(g02, g98)].copy().drop(columns=["segment_n","pm2_lower","pm2_upper"], errors="ignore")
+print(f"🧹 Outlier filter: {len(df_clean):,} registros (de {len(df):,})")
+print(f"   Mediana precio: ${df_clean['precio_num'].median()/1e6:.0f}M | precio_m2: ${df_clean['precio_m2'].median()/1e6:.2f}M")
+
+sector_reference_stats = (df_clean.groupby(["city_token","sector_mercado","tipo_inmueble"])
+    .agg(sector_n=("precio_num","size"),
+         precio_m2_mediano_sector=("precio_m2","median"),
+         precio_m2_p10_sector=("precio_m2", lambda s: s.quantile(0.10)),
+         precio_m2_p25_sector=("precio_m2", lambda s: s.quantile(0.25)),
+         precio_m2_p75_sector=("precio_m2", lambda s: s.quantile(0.75)),
+         precio_m2_p90_sector=("precio_m2", lambda s: s.quantile(0.90)),
+         area_mediana_sector=("area_m2","median")).reset_index())
+sector_reference_stats = sector_reference_stats[sector_reference_stats["sector_n"] >= 8].copy()
+
+# =============================================================
+# 6. PORTAL OPS WEIGHTING (integrado, no re-entrena)
+# =============================================================
+# Calcular sample_weight AQUÍ sobre df_clean — antes el código lo hacía
+# sobre df_clean pero luego re-usaba sample_weight de df en Celda 4 (bug de índices)
+
+portal_weight_map = {}
+if not portal_ops.empty:
+    pw = portal_ops.copy()
+    pw["pw"] = 1.0
+    if "checkpoint_activo" in pw.columns:
+        pw["pw"] *= np.where(pw["checkpoint_activo"].fillna(0) > 0, 0.94, 1.0)
+    if {"checkpoint_activo","checkpoint_age_hours"}.issubset(pw.columns):
+        pw["pw"] *= np.where((pw["checkpoint_activo"].fillna(0)>0) & (pw["checkpoint_age_hours"].fillna(0)>72), 0.96, 1.0)
+    if "pct_multiportal_portal" in pw.columns:
+        pw["pw"] *= np.where(pw["pct_multiportal_portal"].fillna(0) >= 35, 1.03, 1.0)
+    if "dispersion_promedio_portal_pct" in pw.columns:
+        pw["pw"] *= np.where(pw["dispersion_promedio_portal_pct"].fillna(100) >= 40, 0.97, 1.0)
+    if "portal_health_score" in pw.columns:
+        pw["pw"] *= np.where(pw["portal_health_score"].fillna(50) < 45, 0.95, 1.0)
+    pw["pw"] = pw["pw"].clip(0.82, 1.08)
+    portal_weight_map = pw.drop_duplicates("portal").set_index("portal")["pw"].to_dict()
+    print(f"🛰️ Portal ops: {len(portal_weight_map)} portales con multiplicador de peso")
+
+# sample_weight ÚNICO sobre df_clean — índices garantizados
+sample_weight = pd.Series(1.0, index=df_clean.index)
+if "num_portales" in df_clean.columns:
+    sample_weight += df_clean["num_portales"].fillna(1).clip(1,4).sub(1) * 0.20
+if "dispersion_pct_grupo" in df_clean.columns:
+    sample_weight *= np.where(df_clean["dispersion_pct_grupo"].fillna(0) <= 15, 1.10, 0.95)
+    sample_weight *= np.where(df_clean["dispersion_pct_grupo"].fillna(0) >= 35, 0.85, 1.00)
+if "score_consenso_cross_portal" in df_clean.columns:
+    sample_weight *= np.where(df_clean["score_consenso_cross_portal"].fillna(50) >= 70, 1.08, 1.00)
+    sample_weight *= np.where(df_clean["score_consenso_cross_portal"].fillna(50) <= 35, 0.92, 1.00)
+sample_weight *= np.where(df_clean["comuna_mercado"].ne("comuna_otra"), 1.05, 0.95)
+sample_weight *= np.where(df_clean["market_token"].ne("mercado_otro"), 1.03, 0.97)
+# Multiplicador de portal ops
+if portal_weight_map:
+    portal_mult = df_clean["fuente"].fillna("desconocido").str.lower().map(portal_weight_map).fillna(1.0)
+    sample_weight *= portal_mult
+sample_weight = sample_weight.clip(0.65, 1.90)
+
+# =============================================================
+# 7. PREPARACIÓN DE FEATURES PARA EL MODELO
+# =============================================================
+history_numeric = history_feature_cols if history_signal_enabled else []
+engineered_numeric = ["score_consenso_cross_portal","amenities_count","amenity_lujo_score"] + amenity_feature_cols + history_numeric
+cols_numeric_base = [c for c in [
+    "area_m2","log_area_m2","habitaciones","banos","garajes",
+    "banos_por_habitacion","num_portales","dispersion_pct_grupo",
+    "precio_desviacion_grupo_pct","data_completeness",
+] + engineered_numeric if c in df_clean.columns and df_clean[c].notna().mean() > 0.20]
+
+cols_categorical = [c for c in [
+    "tipo_inmueble","estado_inmueble","fuente",
+    "city_token","comunas_mercado",   # se corrige abajo
+    "market_token","sector_mercado",  # NUEVAS
+] if c in df_clean.columns and df_clean[c].nunique() > 1]
+# corregir typo si viene del código anterior
+cols_categorical = [c.replace("comunas_mercado","comuna_mercado") for c in cols_categorical]
+cols_categorical = [c for c in cols_categorical if c in df_clean.columns and df_clean[c].nunique() > 1]
+
+print(f"\n📋 Features finales:")
+print(f"   numérico base:  {len(cols_numeric_base)}")
+print(f"   categórico:     {cols_categorical}")
+print(f"   texto:          texto_completo (TF-IDF max_features=100)")
+
+feature_cols_base = (cols_numeric_base + cols_categorical +
+                     ["texto_completo","market_segment","micro_market_segment",
+                      "sector_mercado","sector_market_segment"])
+X_raw = df_clean[[c for c in feature_cols_base if c in df_clean.columns]].copy()
+y     = df_clean["precio_num"].copy()
+
+X_train_raw, X_test_raw, y_train, y_test, w_train, w_test = train_test_split(
+    X_raw, y, sample_weight, test_size=0.2, random_state=42
+)
+print(f"\nTrain: {len(X_train_raw):,} | Test: {len(X_test_raw):,}")
+
+# =============================================================
+# 8. FEATURES DE MERCADO (leak-safe desde train)
+# =============================================================
+def compute_market_features(train_x, train_y, apply_x):
+    tm = train_x[["city_token","comuna_mercado","sector_mercado","market_segment",
+                   "micro_market_segment","sector_market_segment","fuente","area_m2","habitaciones"]].copy()
+    tm["precio_num"] = train_y.values
+    tm = tm.dropna(subset=["city_token","area_m2","precio_num"])
+    tm = tm[tm["area_m2"] > 0].copy()
+    tm["pm2"] = tm["precio_num"] / tm["area_m2"]
+    p01, p99 = tm["pm2"].quantile(0.01), tm["pm2"].quantile(0.99)
+    tm["pm2"] = tm["pm2"].clip(p01, p99)
+    tm["hab_bucket"] = tm["habitaciones"].fillna(-1).clip(-1, 6)
+
+    city_s    = tm.groupby("city_token").agg(precio_mediano_ciudad=("precio_num","median"),precio_m2_mediano_ciudad=("pm2","median"),area_mediana_ciudad=("area_m2","median")).reset_index()
+    comuna_s  = tm.groupby(["city_token","comuna_mercado"]).agg(precio_mediano_comuna=("precio_num","median"),precio_m2_mediano_comuna=("pm2","median"),comuna_n=("precio_num","size")).reset_index()
+    seg_s     = tm.groupby("market_segment").agg(precio_m2_mediano_segmento=("pm2","median"),precio_mediano_segmento=("precio_num","median")).reset_index()
+    micro_s   = tm.groupby("micro_market_segment").agg(precio_m2_mediano_microsegmento=("pm2","median"),precio_mediano_microsegmento=("precio_num","median"),micro_segmento_n=("precio_num","size")).reset_index()
+    sector_s  = tm.groupby("sector_market_segment").agg(precio_m2_mediano_sector=("pm2","median"),precio_m2_p25_sector=("pm2",lambda s:s.quantile(0.25)),precio_m2_p75_sector=("pm2",lambda s:s.quantile(0.75)),sector_n=("precio_num","size")).reset_index()
+    seg_prof  = tm.groupby("market_segment").agg(segmento_n=("area_m2","size"),area_mediana_segmento=("area_m2","median"),area_p25_segmento=("area_m2",lambda s:s.quantile(0.25)),area_p75_segmento=("area_m2",lambda s:s.quantile(0.75))).reset_index()
+    hab_s     = tm.groupby(["city_token","hab_bucket"]).agg(precio_m2_mediano_habs=("pm2","median")).reset_index()
+    room_freq = (tm.groupby(["market_segment","hab_bucket"]).size().reset_index(name="hab_seg_n").merge(seg_prof[["market_segment","segmento_n"]],on="market_segment",how="left"))
+    room_freq["share_hab_seg"] = room_freq["hab_seg_n"] / room_freq["segmento_n"].replace(0,np.nan)
+
+    src = tm.merge(seg_s, on="market_segment", how="left")
+    src["ratio"] = (src["precio_num"] / (src["area_m2"] * src["precio_m2_mediano_segmento"].replace(0,np.nan))).replace([np.inf,-np.inf],np.nan)
+    src = src.dropna(subset=["ratio"])
+    src["ratio"] = src["ratio"].clip(src["ratio"].quantile(0.01), src["ratio"].quantile(0.99))
+    fuente_r  = src.groupby("fuente").agg(fuente_factor=("ratio","median"),fuente_n=("ratio","size")).reset_index()
+    fuente_sr = src.groupby(["fuente","market_segment"]).agg(fuente_segmento_factor=("ratio","median"),fuente_segmento_n=("ratio","size")).reset_index()
+
+    gpm  = float(tm["precio_num"].median())
+    gpm2 = float(tm["pm2"].median())
+    gam  = float(tm["area_m2"].median())
+    gff  = float(src["ratio"].median()) if len(src) else 1.0
+
+    r = apply_x.reset_index(drop=True).copy()
+    r["hab_bucket"] = r["habitaciones"].fillna(-1).clip(-1, 6)
+    r = r.merge(city_s, on="city_token", how="left")
+    r = r.merge(comuna_s, on=["city_token","comuna_mercado"], how="left")
+    r = r.merge(seg_s, on="market_segment", how="left")
+    r = r.merge(micro_s, on="micro_market_segment", how="left")
+    r = r.merge(sector_s, on="sector_market_segment", how="left")
+    r = r.merge(seg_prof, on="market_segment", how="left")
+    r = r.merge(hab_s, on=["city_token","hab_bucket"], how="left")
+    r = r.merge(room_freq[["market_segment","hab_bucket","share_hab_seg"]], on=["market_segment","hab_bucket"], how="left")
+    r = r.merge(fuente_r, on="fuente", how="left")
+    r = r.merge(fuente_sr, on=["fuente","market_segment"], how="left")
+    r.index = apply_x.index
+
+    # Fallbacks en cascada
+    r["precio_mediano_ciudad"]    = r["precio_mediano_ciudad"].fillna(gpm)
+    r["precio_m2_mediano_ciudad"] = r["precio_m2_mediano_ciudad"].fillna(gpm2)
+    r["area_mediana_ciudad"]      = r["area_mediana_ciudad"].fillna(gam)
+    r["precio_mediano_comuna"]    = r["precio_mediano_comuna"].fillna(r["precio_mediano_ciudad"])
+    r["precio_m2_mediano_comuna"] = r["precio_m2_mediano_comuna"].fillna(r["precio_m2_mediano_ciudad"])
+    r["precio_m2_mediano_segmento"]     = r["precio_m2_mediano_segmento"].fillna(r["precio_m2_mediano_comuna"])
+    r["precio_mediano_segmento"]        = r["precio_mediano_segmento"].fillna(r["precio_mediano_comuna"])
+    r["precio_m2_mediano_microsegmento"]= r["precio_m2_mediano_microsegmento"].fillna(r["precio_m2_mediano_segmento"])
+    r["precio_mediano_microsegmento"]   = r["precio_mediano_microsegmento"].fillna(r["precio_mediano_segmento"])
+    r["precio_m2_mediano_habs"]         = r["precio_m2_mediano_habs"].fillna(r["precio_m2_mediano_microsegmento"])
+    r["precio_m2_mediano_sector"]       = r["precio_m2_mediano_sector"].fillna(r["precio_m2_mediano_comuna"])
+    r["precio_m2_p25_sector"]           = r["precio_m2_p25_sector"].fillna(r["precio_m2_mediano_sector"])
+    r["precio_m2_p75_sector"]           = r["precio_m2_p75_sector"].fillna(r["precio_m2_mediano_sector"])
+
+    # Aplicar umbrales de masa crítica
+    r["precio_m2_mediano_comuna"] = np.where(r["comuna_n"].fillna(0)>=15, r["precio_m2_mediano_comuna"], r["precio_m2_mediano_ciudad"])
+    r["precio_mediano_comuna"]    = np.where(r["comuna_n"].fillna(0)>=15, r["precio_mediano_comuna"],    r["precio_mediano_ciudad"])
+    r["precio_m2_mediano_microsegmento"] = np.where(r["micro_segmento_n"].fillna(0)>=12, r["precio_m2_mediano_microsegmento"], r["precio_m2_mediano_comuna"])
+    r["precio_mediano_microsegmento"]    = np.where(r["micro_segmento_n"].fillna(0)>=12, r["precio_mediano_microsegmento"],    r["precio_mediano_comuna"])
+    r["precio_m2_mediano_sector"] = np.where(r["sector_n"].fillna(0)>=10, r["precio_m2_mediano_sector"], r["precio_m2_mediano_comuna"])
+    r["precio_m2_p25_sector"]     = np.where(r["sector_n"].fillna(0)>=10, r["precio_m2_p25_sector"],     r["precio_m2_mediano_sector"])
+    r["precio_m2_p75_sector"]     = np.where(r["sector_n"].fillna(0)>=10, r["precio_m2_p75_sector"],     r["precio_m2_mediano_sector"])
+
+    r["fuente_factor"]          = r["fuente_factor"].fillna(gff)
+    r["fuente_segmento_factor"] = r["fuente_segmento_factor"].fillna(r["fuente_factor"])
+    r["fuente_segmento_factor"] = np.where(r["fuente_segmento_n"].fillna(0)>=25, r["fuente_segmento_factor"], r["fuente_factor"])
+
+    # Features estimadas
+    r["precio_estimado_ciudad_area"]       = r["area_m2"] * r["precio_m2_mediano_ciudad"]
+    r["precio_estimado_comuna_area"]       = r["area_m2"] * r["precio_m2_mediano_comuna"]
+    r["precio_estimado_segmento_area"]     = r["area_m2"] * r["precio_m2_mediano_segmento"]
+    r["precio_estimado_microsegmento_area"]= r["area_m2"] * r["precio_m2_mediano_microsegmento"]
+    r["precio_estimado_sector_area"]       = r["area_m2"] * r["precio_m2_mediano_sector"]
+    r["precio_sector_rango_bajo_area"]     = r["area_m2"] * r["precio_m2_p25_sector"]
+    r["precio_sector_rango_alto_area"]     = r["area_m2"] * r["precio_m2_p75_sector"]
+    r["precio_estimado_segmento_area_ajustado"] = (
+        (r["precio_estimado_microsegmento_area"] * r["fuente_segmento_factor"])
+        .fillna(r["precio_estimado_microsegmento_area"])
+        .fillna(r["precio_estimado_sector_area"])
+        .fillna(r["precio_estimado_comuna_area"])
+        .fillna(r["precio_estimado_ciudad_area"])
+    )
+    r["area_vs_ciudad_ratio"]  = (r["area_m2"] / r["area_mediana_ciudad"].replace(0,np.nan)).replace([np.inf,-np.inf],np.nan).fillna(1.0)
+    r["ajuste_fuente_pct"]     = (r["fuente_segmento_factor"] - 1.0) * 100.0
+
+    # Rareza
+    r["area_mediana_segmento"]   = r["area_mediana_segmento"].fillna(r["area_m2"].median())
+    area_spread   = (r["area_p75_segmento"] - r["area_p25_segmento"]).replace(0, np.nan)
+    area_scale    = area_spread.fillna(r["area_mediana_segmento"].abs().replace(0,np.nan)*0.25).fillna(max(float(tm["area_m2"].median()*0.25),1.0))
+    r["share_hab_seg"]             = r["share_hab_seg"].fillna(0.10).clip(0.01, 1.0)
+    r["rareza_area_segmento"]      = ((r["area_m2"] - r["area_mediana_segmento"]).abs() / area_scale).clip(0, 8)
+    r["rareza_habitaciones_segmento"] = (1.0 - r["share_hab_seg"]).clip(0, 1)
+    r["rareza_inmueble_segmento"]  = (0.65*r["rareza_area_segmento"] + 0.35*(r["rareza_habitaciones_segmento"]*4)).clip(0, 8)
+    r["rareza_segmento_inversa"]   = (1.0 / np.sqrt(r["segmento_n"].fillna(1).clip(lower=1))).clip(0, 1)
+
+    return (r, city_s, comuna_s, seg_s, micro_s, sector_s, fuente_r, fuente_sr,
+            {"global_price_median":gpm,"global_pm2_median":gpm2,
+             "global_area_median":gam,"global_fuente_factor":gff,
+             "pm2_clip_p01":p01,"pm2_clip_p99":p99})
+
+print("\n🏙️ Calculando features de mercado (solo desde train)...")
+mt0 = time.time()
+# =============================================================
+# FIX — cols_categorical y X_raw con garantía de columnas
+# para compute_market_features
+# =============================================================
+
+cols_categorical = [c for c in [
+    "tipo_inmueble", "estado_inmueble", "fuente",
+    "city_token", "comuna_mercado",
+    "market_token", "sector_mercado",
+] if c in df_clean.columns and df_clean[c].nunique() > 1]
+
+print(f"   categórico OHE: {cols_categorical}")
+
+# Columnas que necesita compute_market_features internamente.
+# Deben estar en X_raw aunque no entren al pipeline de sklearn
+# (ej: comuna_mercado puede tener 1 valor único y quedar fuera de cols_categorical)
+REQUIRED_FOR_MARKET = [
+    "city_token", "comuna_mercado", "sector_mercado",
+    "market_segment", "micro_market_segment", "sector_market_segment",
+    "fuente", "area_m2", "habitaciones",
+]
+extra_for_market = [
+    c for c in REQUIRED_FOR_MARKET
+    if c in df_clean.columns
+    and c not in cols_numeric_base
+    and c not in cols_categorical
+]
+if extra_for_market:
+    print(f"   columnas extra para market features (no van al OHE): {extra_for_market}")
+
+feature_cols_base = list(dict.fromkeys(
+    cols_numeric_base + cols_categorical + extra_for_market + ["texto_completo"]
+))
+
+X_raw = df_clean[[c for c in feature_cols_base if c in df_clean.columns]].copy()
+y     = df_clean["precio_num"].copy()
+
+# Verificación antes del split
+for req in REQUIRED_FOR_MARKET:
+    if req not in X_raw.columns:
+        print(f"⚠️  {req} NO está en X_raw — revisar df_clean")
+    else:
+        print(f"✅  {req} presente en X_raw")
+
+X_train_raw, X_test_raw, y_train, y_test, w_train, w_test = train_test_split(
+    X_raw, y, sample_weight, test_size=0.2, random_state=42
+)
+print(f"\nTrain: {len(X_train_raw):,} | Test: {len(X_test_raw):,}")
+print(f"Columnas en X_train_raw: {list(X_train_raw.columns)}")
+X_train_enriched, city_stats, comuna_stats, segment_stats, micro_segment_stats, sector_stats, fuente_ratio_stats, fuente_segmento_ratio_stats, market_meta = compute_market_features(X_train_raw, y_train, X_train_raw)
+X_test_enriched, *_ = compute_market_features(X_train_raw, y_train, X_test_raw)
+print(f"   Listo en {time.time()-mt0:.1f}s")
+
+market_features = [
+    "precio_mediano_ciudad","precio_mediano_comuna","precio_mediano_segmento","precio_mediano_microsegmento",
+    "precio_m2_mediano_ciudad","precio_m2_mediano_comuna","precio_m2_mediano_segmento",
+    "precio_m2_mediano_microsegmento","precio_m2_mediano_habs",
+    "precio_estimado_ciudad_area","precio_estimado_comuna_area","precio_estimado_segmento_area",
+    "precio_estimado_microsegmento_area","precio_estimado_sector_area",
+    "precio_sector_rango_bajo_area","precio_sector_rango_alto_area",
+    "precio_estimado_segmento_area_ajustado","precio_m2_mediano_sector",
+    "fuente_factor","fuente_segmento_factor","ajuste_fuente_pct","area_vs_ciudad_ratio",
+    "rareza_area_segmento","rareza_habitaciones_segmento","rareza_inmueble_segmento","rareza_segmento_inversa",
+]
+cols_numeric_final = cols_numeric_base + market_features
+
+X_train = X_train_enriched[cols_numeric_final + cols_categorical + ["texto_completo"]].copy()
+X_test  = X_test_enriched[cols_numeric_final + cols_categorical + ["texto_completo"]].copy()
+
+# =============================================================
+# 9. ENTRENAMIENTO
+# =============================================================
+def build_model():
+    transformers = [
+        ("txt", TfidfVectorizer(max_features=100, ngram_range=(1,2), min_df=3,
+                                 stop_words=["en","de","la","el","y","con","se","del","por","los","las","un","una","para","al"],
+                                 sublinear_tf=True), "texto_completo"),
+        ("num", SimpleImputer(strategy="median"), cols_numeric_final),
+    ]
+    if cols_categorical:
+        transformers.append(("cat", Pipeline([
+            ("imp", SimpleImputer(strategy="constant", fill_value="desconocido")),
+            ("enc", OneHotEncoder(handle_unknown="ignore", sparse_output=False, min_frequency=5)),
+        ]), cols_categorical))
+    preprocessor = ColumnTransformer(transformers)
+    xgb = XGBRegressor(n_estimators=900, learning_rate=0.03, max_depth=5,
+                        subsample=0.85, colsample_bytree=0.70, min_child_weight=5,
+                        gamma=0.05, reg_alpha=0.20, reg_lambda=1.4,
+                        random_state=42, n_jobs=-1, verbosity=0)
+    return Pipeline([("preprocessor", preprocessor),
+                     ("regressor", TransformedTargetRegressor(
+                         regressor=xgb, func=np.log1p, inverse_func=np.expm1))])
+
+def eval_preds(name, y_true, y_pred):
+    return {"strategy": name,
+            "r2": float(r2_score(y_true, y_pred)),
+            "mae": float(mean_absolute_error(y_true, y_pred)),
+            "mape": float(mean_absolute_percentage_error(y_true, y_pred) * 100)}
+
+print("\n🚀 Entrenando modelo absoluto...")
+t0 = time.time()
+abs_model = build_model()
+abs_model.fit(X_train, y_train, regressor__sample_weight=w_train.values)
+y_pred_abs = abs_model.predict(X_test)
+metrics_abs = eval_preds("absolute", y_test, y_pred_abs)
+print(f"   Absoluto: R²={metrics_abs['r2']:.4f} MAPE={metrics_abs['mape']:.1f}% ({time.time()-t0:.0f}s)")
+
+print("🚀 Entrenando modelo residual...")
+baseline_train = (X_train_enriched["precio_estimado_segmento_area_ajustado"]
+    .fillna(X_train_enriched["precio_estimado_microsegmento_area"])
+    .fillna(X_train_enriched["precio_estimado_comuna_area"])
+    .fillna(X_train_enriched["precio_estimado_ciudad_area"])
+    .fillna(float(y_train.median())).clip(lower=50_000_000))
+baseline_test  = (X_test_enriched["precio_estimado_segmento_area_ajustado"]
+    .fillna(X_test_enriched["precio_estimado_microsegmento_area"])
+    .fillna(X_test_enriched["precio_estimado_comuna_area"])
+    .fillna(X_test_enriched["precio_estimado_ciudad_area"])
+    .fillna(float(y_train.median())).clip(lower=50_000_000))
+rmask   = y_train.notna() & baseline_train.notna() & np.isfinite(baseline_train) & (baseline_train > 0)
+y_ratio = (y_train.loc[rmask] / baseline_train.loc[rmask]).clip(0.20, 4.50)
+t1 = time.time()
+res_model = build_model()
+res_model.fit(X_train.loc[rmask], y_ratio, regressor__sample_weight=w_train.loc[rmask].values)
+pred_ratio_tr = pd.Series(res_model.predict(X_train.loc[rmask]), index=X_train.loc[rmask].index)
+ratio_clip_low, ratio_clip_high = max(0.25, float(pred_ratio_tr.quantile(0.01))), min(4.00, float(pred_ratio_tr.quantile(0.99)))
+y_pred_res = np.clip(res_model.predict(X_test), ratio_clip_low, ratio_clip_high) * baseline_test.to_numpy()
+metrics_res = eval_preds("residual", y_test, y_pred_res)
+print(f"   Residual: R²={metrics_res['r2']:.4f} MAPE={metrics_res['mape']:.1f}% ({time.time()-t1:.0f}s)")
+
+comparison = pd.DataFrame([metrics_abs, metrics_res]).sort_values(["mape","mae"])
+print("\n📊 COMPARACIÓN:")
+print(comparison.to_string(index=False))
+
+if metrics_res["mape"] < metrics_abs["mape"]:
+    best_strategy, best_model, y_pred = "residual", res_model, y_pred_res
+    r2, mae, mape = metrics_res["r2"], metrics_res["mae"], metrics_res["mape"]
+else:
+    best_strategy, best_model, y_pred = "absolute", abs_model, y_pred_abs
+    r2, mae, mape = metrics_abs["r2"], metrics_abs["mae"], metrics_abs["mape"]
+
+print(f"\n🏆 Ganador: {best_strategy} | R²={r2:.4f} | MAPE={mape:.1f}%")
+
+# MAPE por rango
+df_eval = pd.DataFrame({"real": y_test.values, "pred": y_pred})
+df_eval["rango"] = pd.cut(df_eval["real"],
+    bins=[0, 300e6, 500e6, 800e6, 1500e6, float("inf")],
+    labels=["<300M","300-500M","500-800M","800M-1.5B",">1.5B"])
+mape_table = df_eval.groupby("rango", observed=True).apply(
+    lambda x: pd.Series({"n":len(x),"mape_%":round((abs(x.pred-x.real)/x.real*100).mean(),1),"mae_M":round(abs(x.pred-x.real).mean()/1e6,0)}),
+    include_groups=False)
+print("\n📊 MAPE por rango:\n", mape_table.to_string())
+
+# Importancias
+try:
+    xgb_s = best_model.named_steps["regressor"].regressor_
+    feat_n = best_model.named_steps["preprocessor"].get_feature_names_out()
+    imps   = pd.Series(xgb_s.feature_importances_, index=feat_n)
+    print("\n📊 Top 20 features:")
+    print(imps.sort_values(ascending=False).head(20).to_string())
+    groups = {
+        "texto_tfidf":    imps[imps.index.str.startswith("txt__")].sum(),
+        "numericas":      imps[imps.index.str.startswith("num__")].sum(),
+        "categoricas":    imps[imps.index.str.startswith("cat__")].sum(),
+        "cat__market_token":   imps[imps.index.str.contains("cat__market_token",regex=False)].sum(),
+        "cat__sector_mercado": imps[imps.index.str.contains("cat__sector_mercado",regex=False)].sum(),
+        "cat__comuna_mercado": imps[imps.index.str.contains("cat__comuna_mercado",regex=False)].sum(),
+        "num__precio_estimado_microsegmento_area": imps[imps.index.str.contains("precio_estimado_microsegmento_area",regex=False)].sum(),
+        "num__rareza_inmueble_segmento": imps[imps.index.str.contains("rareza_inmueble_segmento",regex=False)].sum(),
+    }
+    print("\n📊 Importancia por grupo:")
+    for k, v in sorted(groups.items(), key=lambda x: -x[1]):
+        print(f"   {k:48s}: {v:.4f} ({v*100:.1f}%)")
+except Exception as e:
+    print(f"No se pudo extraer importancias: {e}")
+
+# =============================================================
+# 10. BUNDLE Y MANIFEST
+# =============================================================
+model_bundle = {
+    "model":                        best_model,
+    "strategy":                     best_strategy,
+    "city_stats":                   city_stats,
+    "comuna_stats":                 comuna_stats,
+    "segment_stats":                segment_stats,
+    "micro_segment_stats":          micro_segment_stats,
+    "sector_stats":                 sector_stats,
+    "sector_reference_stats":       sector_reference_stats,
+    "fuente_ratio_stats":           fuente_ratio_stats,
+    "fuente_segmento_ratio_stats":  fuente_segmento_ratio_stats,
+    "market_meta":                  market_meta,
+    "feature_cols":                 cols_numeric_final + cols_categorical + ["texto_completo"],
+    "market_features":              market_features,
+    "history_feature_cols":         history_feature_cols,
+    "amenity_feature_cols":         amenity_feature_cols,
+    "history_signal_enabled":       history_signal_enabled,
+    "history_repeated_share":       history_repeated_share,
+    "ratio_clip_low":               ratio_clip_low  if best_strategy == "residual" else None,
+    "ratio_clip_high":              ratio_clip_high if best_strategy == "residual" else None,
+    "portal_ops_applied":           bool(portal_weight_map),
+    "portal_weight_map":            portal_weight_map,
+    "training_source":              training_source,
+    "geo_from_gold":                geo_present,
+    "trained_at":                   datetime.now(tz=timezone.utc).isoformat(),
+    "metrics": {
+        "r2": r2, "mae": mae, "mape": mape,
+        "train_size": len(X_train), "test_size": len(X_test),
+        "history_signal_enabled": history_signal_enabled,
+        "portal_ops_applied": bool(portal_weight_map),
+    },
+    "comparison":  comparison.to_dict(orient="records"),
+    "model_type":  "bundle_v8_unified",
+}
+
+s3 = boto3.client("s3", aws_access_key_id=config["aws_access_key"], aws_secret_access_key=config["aws_secret_key"])
+ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+model_key = f"models/modelo_xgboost_bundle_v8_unified_{ts}.pkl"
+buf = BytesIO()
+pickle.dump(model_bundle, buf)
+buf.seek(0)
+s3.upload_fileobj(buf, BUCKET, model_key)
+print(f"\n💾 Bundle guardado: s3://{BUCKET}/{model_key}")
+
+# Manifest
+manifest_key = "models/manifest.json"
+try:
+    prev = json.loads(s3.get_object(Bucket=BUCKET, Key=manifest_key)["Body"].read())
+    prev_mape = prev.get("metrics", {}).get("mape", float("inf"))
+    prev_exists = True
+except Exception:
+    prev_mape, prev_exists = float("inf"), False
+
+should_promote = FORCE_PROMOTE_TO_CHAMPION or (AUTO_PROMOTE_IF_BETTER and mape < prev_mape) or not prev_exists
+if should_promote:
+    s3.put_object(Bucket=BUCKET, Key=manifest_key,
+                   Body=json.dumps({"champion_model_key": model_key,
+                                     "model_type": "bundle_v8_unified",
+                                     "strategy": best_strategy,
+                                     "trained_at": model_bundle["trained_at"],
+                                     "promoted_at": datetime.now(tz=timezone.utc).isoformat(),
+                                     "metrics": model_bundle["metrics"],
+                                     "comparison": model_bundle["comparison"],
+                                     "promotion_reason": "forced" if FORCE_PROMOTE_TO_CHAMPION
+                                         else ("better_mape" if prev_exists else "bootstrap")},
+                                    indent=2).encode("utf-8"),
+                   ContentType="application/json")
+    print(f"🏆 Manifest actualizado → {model_key}")
+    if prev_exists:
+        print(f"   MAPE: {prev_mape:.2f}% → {mape:.1f}% ({prev_mape-mape:+.2f}pp)")
+else:
+    print(f"📌 No promovido — campeón: {prev.get('champion_model_key')} (MAPE {prev_mape:.2f}%)")
+    print(f"   Challenger: {mape:.1f}% | delta: {prev_mape-mape:+.2f}pp")
+    print("   Usa FORCE_PROMOTE_TO_CHAMPION=True para forzar.")
