@@ -14,15 +14,18 @@ __pycache__/
 file/
 local_s3_dump/
 *.parquet
+*.csv
+*_dump.txt
 
-## Archivos temporales y de asistente
+## Archivos temporales, scripts locales y asistentes
 .assistant
+patch_*.py
+dump_*.py
+gold_cell_*.py
+inspect_bronze.py
+local_analytics.py
+dedup_cross_portal.py
 
 ## Otros
 .DS_Store
 Thumbs.db
-gold_cell_0.py
-gold_cell_1.py
-inspect_bronze.py
-local_analytics.py
-dedup_cross_portal.py
