@@ -1,7 +1,5 @@
 import pandas as pd
 import numpy as np
-import streamlit as st
-
 def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     """Aplica el bundle_v3 al dataframe completo."""
     if bundle is None:
