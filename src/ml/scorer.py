@@ -157,15 +157,50 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
         X = df_pred[feature_cols].copy()
 
-        if strategy == "residual":
-            pred_ratio = pipeline.predict(X)
-            ratio_low = bundle.get("ratio_clip_low", 0.25)
-            ratio_high = bundle.get("ratio_clip_high", 4.0)
-            pred_ratio = np.clip(pred_ratio, ratio_low, ratio_high)
-            baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
-            precio_pred = pred_ratio * baseline.to_numpy()
+        # --- LÓGICA DE PREDICCIÓN (Híbrida JSON/Pickle) ---
+        model_json = bundle.get("model_json")
+        if model_json:
+            try:
+                import xgboost as xgb
+                import io
+                
+                # Cargar el booster nativo desde el JSON embebido
+                bst = xgb.Booster()
+                # Si model_json es string (de un JSON de S3), codificar. Si es bytes, usar directo.
+                if isinstance(model_json, str):
+                    model_json = model_json.encode('latin1')
+                
+                bst.load_model(bytearray(model_json))
+                
+                # IMPORTANTE: Aplicar el preprocesador de sklearn antes de XGBoost nativo
+                # El preprocesador está en pipeline.named_steps['preprocessor']
+                if hasattr(pipeline, 'named_steps') and 'preprocessor' in pipeline.named_steps:
+                    X_proc = pipeline.named_steps['preprocessor'].transform(X)
+                else:
+                    # Caso de fallback si no es un pipeline estándar
+                    X_proc = X
+                
+                # XGBoost nativo requiere DMatrix
+                dtrain = xgb.DMatrix(X_proc)
+                precio_pred = bst.predict(dtrain)
+                
+                # Si el modelo original trabajaba en LOG, hay que aplicar la inversa (expm1)
+                # En bundle_v8, la estrategia residual y absoluta usan log1p internamente
+                precio_pred = np.expm1(precio_pred)
+                print("✅ Predicción realizada con Booster nativo (JSON).")
+            except Exception as e_json:
+                print(f"⚠️ Falló carga JSON ({e_json}), reintentando con Pipeline original...")
+                precio_pred = pipeline.predict(X)
         else:
-            precio_pred = pipeline.predict(X)
+            if strategy == "residual":
+                pred_ratio = pipeline.predict(X)
+                ratio_low = bundle.get("ratio_clip_low", 0.25)
+                ratio_high = bundle.get("ratio_clip_high", 4.0)
+                pred_ratio = np.clip(pred_ratio, ratio_low, ratio_high)
+                baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
+                precio_pred = pred_ratio * baseline.to_numpy()
+            else:
+                precio_pred = pipeline.predict(X)
 
         df["precio_predicho"] = precio_pred
         df["rentabilidad_potencial"] = (
