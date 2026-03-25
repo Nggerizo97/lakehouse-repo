@@ -161,18 +161,22 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
         import xgboost as xgb
         import pickle
         import io
+        import traceback
 
         # 1. Cargar el preprocesador (Punto de fallo por versión de sklearn)
         preprocessor = None
         preprocessor_blob = bundle.get("preprocessor_pickle")
         if preprocessor_blob:
             try:
+                # Si viene como str (poco probable en v8_unified pero posible en migraciones), convertir a bytes
+                if isinstance(preprocessor_blob, str):
+                    preprocessor_blob = preprocessor_blob.encode('latin1')
                 preprocessor = pickle.loads(preprocessor_blob)
             except Exception as e_prep:
-                print(f"⚠️ Error deserializando preprocesador (sklearn version mismatch?): {e_prep}")
+                print(f"⚠️ Error deserializando preprocesador: {e_prep}")
         
         if preprocessor is None:
-            # Intentar usar el bundle['model'] antiguo por retrocompatibilidad
+            # Fallback legacy
             old_pipe = bundle.get("model")
             if hasattr(old_pipe, 'named_steps'):
                 preprocessor = old_pipe.named_steps.get('preprocessor')
@@ -180,32 +184,43 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
         # 2. Cargar el Booster nativo
         model_json = bundle.get("model_json")
         if model_json:
-            bst = xgb.Booster()
-            if isinstance(model_json, str):
-                model_json = model_json.encode('latin1')
-            bst.load_model(bytearray(model_json))
-            
-            # Transformar features
-            if preprocessor:
-                X_proc = preprocessor.transform(X)
-            else:
-                raise ValueError("No se pudo cargar el preprocesador para transformar los datos.")
-            
-            dtrain = xgb.DMatrix(X_proc)
-            precio_pred = bst.predict(dtrain)
-            
-            # LOG Transform Inverse (expm1) - v8_unified maneja logs
-            # Si el bundle no dice lo contrario, asumimos log (best_strategy)
-            precio_pred = np.expm1(precio_pred)
-            print("✅ Predicción realizada con Booster nativo.")
+            try:
+                bst = xgb.Booster()
+                if isinstance(model_json, str):
+                    model_json = model_json.encode('utf-8')
+                bst.load_model(bytearray(model_json))
+                
+                if preprocessor:
+                    X_proc = preprocessor.transform(X)
+                else:
+                    raise ValueError("Preprocesador no disponible (Version mismatch o carga fallida)")
+                
+                # Asegurar formato DMatrix (soporta sparse)
+                dtrain = xgb.DMatrix(X_proc)
+                precio_pred = bst.predict(dtrain)
+                
+                # Inverse Log Transform (v8 siempre entrena en log1p)
+                precio_pred = np.expm1(precio_pred)
+            except Exception as e_xgb:
+                # Si falla el booster, intentamos fallback a pickle si existe
+                print(f"⚠️ Error en Booster nativo: {e_xgb}")
+                pipeline = bundle.get("model")
+                if pipeline:
+                    precio_pred = pipeline.predict(X)
+                    if hasattr(pipeline, 'named_steps') and strategy != "residual": # TTR maneja el log solo
+                         pass
+                    else:
+                         precio_pred = np.expm1(precio_pred)
+                else:
+                    raise e_xgb
         else:
-            # Fallback al pipeline original si no hay JSON
+            # Fallback total a Pickle
             pipeline = bundle.get("model")
+            if pipeline is None:
+                 raise ValueError("No hay modelo (JSON ni Pickle) disponible en el bundle.")
+            
             if strategy == "residual":
                 pred_ratio = pipeline.predict(X)
-                ratio_low = bundle.get("ratio_clip_low", 0.25)
-                ratio_high = bundle.get("ratio_clip_high", 4.0)
-                pred_ratio = np.clip(pred_ratio, ratio_low, ratio_high)
                 baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
                 precio_pred = pred_ratio * baseline.to_numpy()
             else:
@@ -213,11 +228,11 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
         df["precio_predicho"] = precio_pred
         df["rentabilidad_potencial"] = (
-            (df["precio_predicho"] - df["precio_num"]) / df["precio_num"] * 100
+            (df["precio_predicho"] - df["precio_num"]) / df["precio_num"].replace(0, np.nan) * 100
         ).replace([np.inf, -np.inf], 0).fillna(0).round(1)
 
         mape_modelo = bundle.get("metrics", {}).get("mape", 23.0)
-        signal_threshold = max(12.0, min(20.0, float(mape_modelo) * 0.65))
+        signal_threshold = max(12.0, min(25.0, float(mape_modelo) * 0.75))
 
         df["estado_inversion"] = df["rentabilidad_potencial"].apply(
             lambda x: "Oportunidad" if x > signal_threshold
@@ -225,9 +240,12 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
         )
 
     except Exception as e:
-        df["precio_predicho"] = df["precio_num"]
+        traceback.print_exc()
+        df["precio_predicho"] = df["precio_num"] if "precio_num" in df.columns else 0.0
         df["rentabilidad_potencial"] = 0.0
-        df["estado_inversion"] = "Sin señal"
+        # TRUCO: Meter el error en el estado para que el usuario lo vea en el UI
+        err_msg = str(e)[:50]
+        df["estado_inversion"] = f"Error: {err_msg}"
 
     return df
 
