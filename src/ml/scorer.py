@@ -201,6 +201,12 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
                 
                 # Inverse Log Transform (v8 siempre entrena en log1p)
                 precio_pred = np.expm1(precio_pred)
+                
+                # 🚨 FIX: Si el modelo es residual, multiplicar por el baseline
+                if strategy == "residual":
+                    baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
+                    precio_pred = precio_pred * baseline.to_numpy()
+                
             except Exception as e_xgb:
                 # Si falla el booster, intentamos fallback a pickle si existe
                 print(f"⚠️ Error en Booster nativo: {e_xgb}")
@@ -211,6 +217,9 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
                          pass
                     else:
                          precio_pred = np.expm1(precio_pred)
+                         if strategy == "residual":
+                             baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
+                             precio_pred = precio_pred * baseline.to_numpy()
                 else:
                     raise e_xgb
         else:
@@ -241,11 +250,11 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
     except Exception as e:
         traceback.print_exc()
-        df["precio_predicho"] = df["precio_num"] if "precio_num" in df.columns else 0.0
+        # 🚨 FIX: No hagas fallback al precio original si es 0 (falla de score_single)
+        df["precio_predicho"] = np.nan
         df["rentabilidad_potencial"] = 0.0
-        # TRUCO: Meter el error en el estado para que el usuario lo vea en el UI
         err_msg = str(e)[:50]
-        df["estado_inversion"] = f"Error: {err_msg}"
+        df["estado_inversion"] = f"Error Crítico: {err_msg}"
 
     return df
 
@@ -264,6 +273,10 @@ def score_single(row: dict, bundle: dict) -> dict:
     scored = score_dataframe(df_temp, bundle)
     r = scored.iloc[0]
     
+    # 🚨 FIX: Capturar el error si la predicción es NaN
+    if pd.isna(r["precio_predicho"]):
+        return {"error": r["estado_inversion"]}
+
     mape_pct = bundle.get("metrics", {}).get("mape", 23.0)
     valor = float(r["precio_predicho"])
     
