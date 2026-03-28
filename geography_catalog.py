@@ -96,6 +96,8 @@ CITY_CATALOG = {
     "apulo": {"aliases": ["apulo"], "department": "cundinamarca", "region": "andina"},
     "ricaurte": {"aliases": ["ricaurte"], "department": "cundinamarca", "region": "andina"},
     "pacho": {"aliases": ["pacho"], "department": "cundinamarca", "region": "andina"},
+    "chaguani": {"aliases": ["chaguani"], "department": "cundinamarca", "region": "andina"},
+    "viani": {"aliases": ["viani"], "department": "cundinamarca", "region": "andina"},
 
     # ── Valle del Cauca — Cali metropolitana ─────────────────
     "jamundi": {"aliases": ["jamundi"], "department": "valle_del_cauca", "region": "pacifica"},
@@ -105,16 +107,23 @@ CITY_CATALOG = {
     "dagua": {"aliases": ["dagua"], "department": "valle_del_cauca", "region": "pacifica"},
     "la cumbre": {"aliases": ["la cumbre"], "department": "valle_del_cauca", "region": "pacifica"},
 
-    # ── Valle del Cauca — Norte del Valle ────────────────────
+    # ── Valle del Cauca — Norte del Valle / Interior ─────────
     "cartago": {"aliases": ["cartago"], "department": "valle_del_cauca", "region": "pacifica"},
     "tulua": {"aliases": ["tulua"], "department": "valle_del_cauca", "region": "pacifica"},
     "alcala": {"aliases": ["alcala"], "department": "valle_del_cauca", "region": "pacifica"},
+    "buga": {"aliases": ["buga", "guadalajara de buga"], "department": "valle_del_cauca", "region": "pacifica"},
+    "el cerrito": {"aliases": ["el cerrito"], "department": "valle_del_cauca", "region": "pacifica"},
+    "pradera": {"aliases": ["pradera"], "department": "valle_del_cauca", "region": "pacifica"},
+    "florida_vc": {"aliases": ["florida valle"], "department": "valle_del_cauca", "region": "pacifica"},
+    "buenaventura": {"aliases": ["buenaventura"], "department": "valle_del_cauca", "region": "pacifica"},
 
     # ── Atlántico — Barranquilla metropolitana ───────────────
     "soledad": {"aliases": ["soledad"], "department": "atlantico", "region": "caribe"},
     "puerto colombia": {"aliases": ["puerto colombia"], "department": "atlantico", "region": "caribe"},
     "juan de acosta": {"aliases": ["juan de acosta"], "department": "atlantico", "region": "caribe"},
     "tubara": {"aliases": ["tubara"], "department": "atlantico", "region": "caribe"},
+    "malambo": {"aliases": ["malambo"], "department": "atlantico", "region": "caribe"},
+    "galapa": {"aliases": ["galapa"], "department": "atlantico", "region": "caribe"},
 
     # ── Santander — Bucaramanga metropolitana ────────────────
     "floridablanca": {"aliases": ["floridablanca"], "department": "santander", "region": "andina"},
@@ -123,6 +132,7 @@ CITY_CATALOG = {
     "lebrija": {"aliases": ["lebrija"], "department": "santander", "region": "andina"},
     "los santos": {"aliases": ["los santos", "mesa de los santos"], "department": "santander", "region": "andina"},
     "barrancabermeja": {"aliases": ["barrancabermeja"], "department": "santander", "region": "andina"},
+    "san gil": {"aliases": ["san gil"], "department": "santander", "region": "andina"},
 
     # ── Risaralda — Eje Cafetero ─────────────────────────────
     "dosquebradas": {"aliases": ["dosquebradas"], "department": "risaralda", "region": "andina"},
@@ -146,10 +156,16 @@ CITY_CATALOG = {
     "flandes": {"aliases": ["flandes"], "department": "tolima", "region": "andina"},
     "mariquita": {"aliases": ["mariquita"], "department": "tolima", "region": "andina"},
     "alvarado": {"aliases": ["alvarado"], "department": "tolima", "region": "andina"},
+    "espinal": {"aliases": ["espinal", "el espinal"], "department": "tolima", "region": "andina"},
+    "honda": {"aliases": ["honda"], "department": "tolima", "region": "andina"},
+    "guamo": {"aliases": ["guamo"], "department": "tolima", "region": "andina"},
 
     # ── Boyacá ───────────────────────────────────────────────
     "villa de leyva": {"aliases": ["villa de leyva"], "department": "boyaca", "region": "andina"},
     "duitama": {"aliases": ["duitama"], "department": "boyaca", "region": "andina"},
+    "sogamoso": {"aliases": ["sogamoso"], "department": "boyaca", "region": "andina"},
+    "paipa": {"aliases": ["paipa"], "department": "boyaca", "region": "andina"},
+    "chiquinquira": {"aliases": ["chiquinquira"], "department": "boyaca", "region": "andina"},
 
     # ── Meta ─────────────────────────────────────────────────
     "restrepo": {"aliases": ["restrepo"], "department": "meta", "region": "orinoquia"},
@@ -157,6 +173,21 @@ CITY_CATALOG = {
 
     # ── Norte de Santander ───────────────────────────────────
     "los patios": {"aliases": ["los patios"], "department": "norte_de_santander", "region": "andina"},
+    "villa del rosario": {"aliases": ["villa del rosario"], "department": "norte_de_santander", "region": "andina"},
+
+    # ── Bolívar — Cartagena metropolitana ────────────────────
+    "turbaco": {"aliases": ["turbaco"], "department": "bolivar", "region": "caribe"},
+    "arjona": {"aliases": ["arjona"], "department": "bolivar", "region": "caribe"},
+
+    # ── Caldas — Magdalena Medio ─────────────────────────────
+    "la dorada": {"aliases": ["la dorada"], "department": "caldas", "region": "andina"},
+
+    # ── Cauca ────────────────────────────────────────────────
+    "santander de quilichao": {"aliases": ["santander de quilichao"], "department": "cauca", "region": "pacifica"},
+
+    # ── Huila ────────────────────────────────────────────────
+    "pitalito": {"aliases": ["pitalito"], "department": "huila", "region": "andina"},
+    "garzon": {"aliases": ["garzon"], "department": "huila", "region": "andina"},
 }
 
 MARKET_CATALOG = {
@@ -192,6 +223,8 @@ MARKET_CATALOG = {
         "apulo",
         "ricaurte",
         "pacho",
+        "chaguani",
+        "viani",
     ],
     "valle_aburra": [
         "medellin",
@@ -228,11 +261,16 @@ MARKET_CATALOG = {
         "candelaria",
         "dagua",
         "la cumbre",
+        "el cerrito",
+        "pradera",
+        "florida_vc",
     ],
     "norte_valle": [
         "cartago",
         "tulua",
         "alcala",
+        "buga",
+        "buenaventura",
     ],
     "barranquilla_metropolitana": [
         "barranquilla",
@@ -240,9 +278,13 @@ MARKET_CATALOG = {
         "puerto colombia",
         "juan de acosta",
         "tubara",
+        "malambo",
+        "galapa",
     ],
     "cartagena_metropolitana": [
         "cartagena",
+        "turbaco",
+        "arjona",
     ],
     "bucaramanga_metropolitana": [
         "bucaramanga",
@@ -251,6 +293,7 @@ MARKET_CATALOG = {
         "giron",
         "lebrija",
         "los santos",
+        "san gil",
     ],
     "eje_cafetero": [
         "pereira",
@@ -266,6 +309,7 @@ MARKET_CATALOG = {
         "montenegro",
         "villamaria",
         "palestina",
+        "la dorada",
     ],
     "turismo_tolima": [
         "melgar",
@@ -273,10 +317,14 @@ MARKET_CATALOG = {
         "flandes",
         "mariquita",
         "alvarado",
+        "espinal",
+        "honda",
+        "guamo",
     ],
     "cucuta_metropolitana": [
         "cucuta",
         "los patios",
+        "villa del rosario",
     ],
     "santa_marta_metropolitana": [
         "santa marta",
@@ -294,12 +342,15 @@ MARKET_CATALOG = {
     ],
     "neiva_metropolitana": [
         "neiva",
+        "pitalito",
+        "garzon",
     ],
     "ibague_metropolitana": [
         "ibague",
     ],
     "popayan_metropolitana": [
         "popayan",
+        "santander de quilichao",
     ],
     "valledupar_metropolitana": [
         "valledupar",
@@ -311,6 +362,9 @@ MARKET_CATALOG = {
         "tunja",
         "villa de leyva",
         "duitama",
+        "sogamoso",
+        "paipa",
+        "chiquinquira",
     ],
     "barrancabermeja_metropolitana": [
         "barrancabermeja",

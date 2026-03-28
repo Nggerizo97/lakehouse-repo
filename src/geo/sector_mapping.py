@@ -411,9 +411,182 @@ COMUNA_KEYWORDS_BY_CITY: dict = {
     "ibague": {
         "ambala_picaleña": [
             "ambala ibague", "picaleña", "el jordan ibague",
+            "la pola ibague", "san simon ibague",
         ],
-        "centro_ibague": ["centro ibague"],
-        "calambeo_zona": ["calambeo ibague"],
+        "centro_ibague": ["centro ibague", "belcancito ibague"],
+        "calambeo_zona": ["calambeo ibague", "la martinica ibague"],
+        "norte_ibague": ["vergel ibague", "santa helena ibague",
+                         "la francia ibague"],
+    },
+
+    # ── CÚCUTA + NORTE DE SANTANDER ──────────────────────────
+    "cucuta": {
+        "caobos_cabecera": [
+            "caobos cucuta", "quinta oriental", "el bosque cucuta",
+            "guaimaral cucuta", "prados del este cucuta",
+            "la ceiba cucuta", "puente barco cucuta",
+            "colsag cucuta", "sayago cucuta",
+        ],
+        "centro_cucuta": [
+            "centro cucuta", "barco cucuta", "lleras cucuta",
+            "la playa cucuta", "callejon cucuta",
+        ],
+        "atalaya_zona": [
+            "atalaya cucuta", "claret cucuta", "la libertad cucuta",
+            "san eduardo cucuta", "ospina perez cucuta",
+        ],
+        "los_patios_zona": ["los patios", "brisas los patios"],
+        "villa_rosario_zona": ["villa del rosario"],
+    },
+
+    # ── VILLAVICENCIO + META ─────────────────────────────────
+    "villavicencio": {
+        "barzal_centro": [
+            "barzal villavicencio", "centro villavicencio",
+            "la grama villavicencio", "emporio villavicencio",
+            "el caudal villavicencio",
+        ],
+        "esperanza_zona": [
+            "la esperanza villavicencio", "la coralina villavicencio",
+            "villa maria villavicencio", "la rosita villavicencio",
+        ],
+        "norte_villavicencio": [
+            "porfias villavicencio", "montecarlo villavicencio",
+            "la florida villavicencio", "llano lindo",
+            "catama villavicencio",
+        ],
+        "sur_villavicencio": [
+            "la vega villavicencio", "comuneros villavicencio",
+            "dona luz villavicencio",
+        ],
+        "restrepo_zona": ["restrepo meta"],
+        "cumaral_zona": ["cumaral meta"],
+    },
+
+    # ── NEIVA + HUILA ────────────────────────────────────────
+    "neiva": {
+        "calixto_zona": [
+            "calixto neiva", "la toma neiva",
+            "caguan neiva", "candido neiva",
+        ],
+        "centro_neiva": ["centro neiva", "altico neiva", "quirinal neiva"],
+        "sur_neiva": [
+            "ipiales neiva", "santa isabel neiva",
+            "las palmas neiva", "miraflores neiva",
+        ],
+        "norte_neiva": [
+            "buganviles neiva", "los alamos neiva",
+            "la floresta neiva", "el jardin neiva",
+        ],
+        "pitalito_zona": ["pitalito"],
+        "garzon_zona": ["garzon"],
+    },
+
+    # ── MONTERÍA + CÓRDOBA ─────────────────────────────────
+    "monteria": {
+        "castellana_zona": [
+            "la castellana monteria", "el recreo monteria",
+            "norte monteria", "los alamos monteria",
+            "bonanza monteria", "la julia monteria",
+        ],
+        "centro_monteria": ["centro monteria", "calle 29 monteria"],
+        "sur_monteria": [
+            "sur monteria", "la pradera monteria", "cantaclaro monteria",
+            "mogambo monteria", "el prado monteria",
+        ],
+    },
+
+    # ── PASTO + NARIÑO ─────────────────────────────────────
+    "pasto": {
+        "centro_pasto": ["centro pasto", "santiago pasto",
+                         "san felipe pasto"],
+        "norte_pasto": ["aranda pasto", "la aurora pasto",
+                        "chapalito pasto", "torobajo pasto"],
+        "sur_pasto": ["anganoy pasto", "tamasagra pasto",
+                      "miraflores pasto", "pandiaco pasto"],
+    },
+
+    # ── VALLEDUPAR + CESAR ──────────────────────────────────
+    "valledupar": {
+        "novalito_zona": [
+            "novalito valledupar", "villa rosario valledupar",
+            "la nevada valledupar", "alamos valledupar",
+            "sabanas del valle valledupar",
+        ],
+        "centro_valledupar": [
+            "centro valledupar", "primero de mayo valledupar",
+            "los mayales valledupar", "villa concha valledupar",
+        ],
+        "norte_valledupar": [
+            "la esperanza valledupar", "villa del rosario valledupar",
+        ],
+    },
+
+    # ── POPAYÁN + CAUCA ───────────────────────────────────
+    "popayan": {
+        "centro_popayan": [
+            "centro popayan", "centro historico popayan",
+            "la pamba popayan", "el empedrado popayan",
+        ],
+        "norte_popayan": [
+            "la esmeralda popayan", "los campos popayan",
+            "vereda gonzalez popayan",
+        ],
+        "sur_popayan": [
+            "las americas popayan", "bello horizonte popayan",
+            "pandiguando popayan",
+        ],
+        "quilichao_zona": ["santander de quilichao"],
+    },
+
+    # ── TUNJA + BOYACÁ ────────────────────────────────────
+    "tunja": {
+        "centro_tunja": [
+            "centro tunja", "centro historico tunja",
+            "santa barbara tunja",
+        ],
+        "norte_tunja": [
+            "los muiscas tunja", "santa ines tunja",
+            "los patriotas tunja", "hunza tunja",
+        ],
+        "sur_tunja": [
+            "la fuente tunja", "la granja tunja",
+            "san rafael tunja",
+        ],
+        "villa_leyva_zona": ["villa de leyva"],
+        "duitama_zona": ["duitama"],
+        "paipa_zona": ["paipa"],
+        "sogamoso_zona": ["sogamoso"],
+        "chiquinquira_zona": ["chiquinquira"],
+    },
+
+    # ── BARRANCABERMEJA ────────────────────────────────────
+    "barrancabermeja": {
+        "centro_barranca": [
+            "centro barrancabermeja", "comercio barrancabermeja",
+            "colombia barrancabermeja",
+        ],
+        "norte_barranca": [
+            "el campestre barrancabermeja", "la felicidad barrancabermeja",
+            "olaya barrancabermeja",
+        ],
+        "sur_barranca": [
+            "los pinos barrancabermeja", "boston barrancabermeja",
+        ],
+    },
+
+    # ── GIRARDOT + TURISMO CUNDINAMARCA / TOLIMA ──────────────
+    "girardot": {
+        "centro_girardot": ["centro girardot", "el penon girardot"],
+        "norte_girardot": [
+            "portachuelo girardot", "brisas del magdalena girardot",
+        ],
+        "sur_girardot": ["santa helena girardot"],
+        "melgar_zona": ["melgar"],
+        "carmen_apicala_zona": ["carmen de apicala"],
+        "flandes_zona": ["flandes"],
+        "espinal_zona": ["espinal"],
+        "ricaurte_zona": ["ricaurte cundinamarca"],
     },
 
 }
@@ -433,32 +606,70 @@ CITY_TO_CATALOG: dict = {
     "copacabana": "medellin", "rionegro": "medellin",
     "la ceja": "medellin", "el retiro": "medellin",
     "guarne": "medellin", "marinilla": "medellin",
+    "caldas_antioquia": "medellin", "barbosa_antioquia": "medellin",
+    "el carmen de viboral": "medellin", "penol": "medellin",
+    "guatape": "medellin", "san vicente": "medellin",
     # Sabana Bogotá
     "bogota": "bogota", "chia": "bogota",
     "cajica": "bogota", "mosquera": "bogota",
     "cota": "bogota", "soacha": "bogota",
     "zipaquira": "bogota", "la calera": "bogota",
     "sopo": "bogota", "tocancipa": "bogota",
+    "funza": "bogota", "madrid": "bogota",
+    "tenjo": "bogota", "tabio": "bogota",
+    "guasca": "bogota", "subachoque": "bogota",
+    "sesquile": "bogota", "choconta": "bogota", "choachi": "bogota",
     # Cali metropolitana
     "cali": "cali", "jamundi": "cali",
     "yumbo": "cali", "palmira": "cali",
-    "candelaria": "cali",
+    "candelaria": "cali", "dagua": "cali", "la cumbre": "cali",
+    "el cerrito": "cali", "pradera": "cali", "florida_vc": "cali",
     # Barranquilla metropolitana
     "barranquilla": "barranquilla",
     "soledad": "barranquilla",
     "puerto colombia": "barranquilla",
+    "juan de acosta": "barranquilla",
+    "tubara": "barranquilla",
+    "malambo": "barranquilla", "galapa": "barranquilla",
     # Bucaramanga metropolitana
     "bucaramanga": "bucaramanga",
     "floridablanca": "bucaramanga",
     "piedecuesta": "bucaramanga",
     "giron": "bucaramanga",
-    # Ciudades independientes
+    "lebrija": "bucaramanga", "los santos": "bucaramanga",
+    "san gil": "bucaramanga",
+    # Cartagena metropolitana
     "cartagena": "cartagena",
+    "turbaco": "cartagena", "arjona": "cartagena",
+    # Ciudades independientes con catálogo propio
     "santa marta": "santa marta",
-    "pereira": "pereira",
-    "manizales": "manizales",
+    "pereira": "pereira", "dosquebradas": "pereira",
+    "santa rosa de cabal": "pereira",
+    "manizales": "manizales", "villamaria": "manizales",
     "armenia": "armenia",
+    "calarca": "armenia", "la tebaida": "armenia",
+    "quimbaya": "armenia", "montenegro": "armenia",
+    "circasia": "armenia", "filandia": "armenia",
     "ibague": "ibague",
+    # Nuevas ciudades con catálogo propio
+    "cucuta": "cucuta", "los patios": "cucuta",
+    "villa del rosario": "cucuta",
+    "villavicencio": "villavicencio",
+    "restrepo": "villavicencio", "cumaral": "villavicencio",
+    "neiva": "neiva", "pitalito": "neiva", "garzon": "neiva",
+    "monteria": "monteria",
+    "pasto": "pasto",
+    "valledupar": "valledupar",
+    "popayan": "popayan", "santander de quilichao": "popayan",
+    "tunja": "tunja", "villa de leyva": "tunja",
+    "duitama": "tunja", "sogamoso": "tunja",
+    "paipa": "tunja", "chiquinquira": "tunja",
+    "barrancabermeja": "barrancabermeja",
+    # Turismo Cundinamarca / Tolima
+    "girardot": "girardot", "melgar": "girardot",
+    "carmen de apicala": "girardot", "flandes": "girardot",
+    "espinal": "girardot", "ricaurte": "girardot",
+    "fusagasuga": "girardot", "anapoima": "girardot",
 }
 
 
@@ -484,6 +695,10 @@ CITY_TOKENS: set = {
     "piedecuesta", "giron", "soledad", "colombia", "antioquia",
     "cundinamarca", "atlantico", "bolivar", "santander",
     "risaralda", "caldas", "quindio", "tolima",
+    "villavicencio", "neiva", "monteria", "pasto", "valledupar",
+    "popayan", "tunja", "sincelejo", "boyaca", "huila",
+    "meta", "narino", "cauca", "cesar", "cordoba", "sucre",
+    "norte", "magdalena", "barrancabermeja", "girardot",
 }
 
 
@@ -579,3 +794,37 @@ def get_spark_udfs():
         udf(extract_sector_mercado, StringType()),
         udf(_canonicalize_city, StringType()),
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# VALIDACIÓN DE INTEGRIDAD
+# ══════════════════════════════════════════════════════════════════
+
+def validate_catalogs() -> dict:
+    """
+    Valida que los keywords no colisionen entre catálogos de ciudades distintas.
+    Retorna dict de keywords ambiguos → lista de city/comuna que los contienen.
+    """
+    from collections import Counter
+    keyword_source: dict = {}
+
+    for city, comunas in COMUNA_KEYWORDS_BY_CITY.items():
+        for comuna, keywords in comunas.items():
+            for kw in keywords:
+                keyword_source.setdefault(kw, []).append(f"{city}/{comuna}")
+
+    # Solo reportar keywords que aparecen en catálogos de ciudades DISTINTAS
+    cross_city = {}
+    for kw, sources in keyword_source.items():
+        cities = {s.split("/")[0] for s in sources}
+        if len(cities) > 1:
+            cross_city[kw] = sources
+
+    if cross_city:
+        import warnings
+        warnings.warn(
+            f"⚠️ sector_mapping: {len(cross_city)} keywords aparecen en "
+            f"catálogos de ciudades distintas: "
+            + ", ".join(f"'{k}' → {v}" for k, v in list(cross_city.items())[:5])
+        )
+    return cross_city
