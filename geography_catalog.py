@@ -236,6 +236,9 @@ MARKET_CATALOG = {
         "copacabana",
         "caldas_antioquia",
         "barbosa_antioquia",
+        "amaga",
+        "fredonia",
+        "san pedro de los milagros",
     ],
     "oriente_antioqueno": [
         "rionegro",
@@ -252,6 +255,7 @@ MARKET_CATALOG = {
         "sopetran",
         "santa fe de antioquia",
         "san jeronimo",
+        "jardin",
     ],
     "cali_metropolitana": [
         "cali",
