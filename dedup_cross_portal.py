@@ -127,6 +127,25 @@ normalizar_tipo_udf = F.udf(_normalizar_tipo, StringType())
 # ─────────────────────────────────────────────────────────────────
 
 def prepare_for_matching(df_silver: DataFrame) -> DataFrame:
+    # ── Gate: dedup intra-portal antes de matching cross-portal ──
+    # Elimina snapshots temporales del mismo listing (mismo portal + id)
+    # que inflarían falsos positivos y duplicados en Gold.
+    if "fecha_extraccion" in df_silver.columns and "id_original" in df_silver.columns:
+        from pyspark.sql import Window as _W
+        _w_intra = _W.partitionBy("fuente", "id_original").orderBy(
+            F.desc("fecha_extraccion"))
+        _n_pre = df_silver.count()
+        df_silver = (
+            df_silver
+            .withColumn("_intra_rank", F.row_number().over(_w_intra))
+            .filter(F.col("_intra_rank") == 1)
+            .drop("_intra_rank")
+        )
+        _n_post = df_silver.count()
+        if _n_pre != _n_post:
+            print(f"  🧹 Dedup intra-portal (pre-matching): {_n_pre:,} → {_n_post:,} "
+                  f"(-{_n_pre - _n_post:,})")
+
     return (
         df_silver
         .withColumn("ubicacion_norm", normalize_location_udf(F.col("ubicacion_raw")))
