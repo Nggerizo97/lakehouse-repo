@@ -46,7 +46,7 @@ CITY_CATALOG = {
     # ── Antioquia — Oriente Antioqueño ───────────────────────
     "rionegro": {"aliases": ["rionegro"], "department": "antioquia", "region": "andina"},
     "la ceja": {"aliases": ["la ceja"], "department": "antioquia", "region": "andina"},
-    "el retiro": {"aliases": ["el retiro"], "department": "antioquia", "region": "andina"},
+    "el retiro": {"aliases": ["el retiro", "retiro", "fizebad", "pantanillo", "don diego", "la fe"], "department": "antioquia", "region": "andina"},
     "guarne": {"aliases": ["guarne"], "department": "antioquia", "region": "andina"},
     "marinilla": {"aliases": ["marinilla"], "department": "antioquia", "region": "andina"},
     "el carmen de viboral": {"aliases": ["el carmen de viboral", "carmen de viboral"], "department": "antioquia", "region": "andina"},
@@ -106,6 +106,7 @@ CITY_CATALOG = {
     "candelaria": {"aliases": ["candelaria"], "department": "valle_del_cauca", "region": "pacifica"},
     "dagua": {"aliases": ["dagua"], "department": "valle_del_cauca", "region": "pacifica"},
     "la cumbre": {"aliases": ["la cumbre"], "department": "valle_del_cauca", "region": "pacifica"},
+    "calima": {"aliases": ["calima", "calima el darien", "darien"], "department": "valle_del_cauca", "region": "pacifica"},
 
     # ── Valle del Cauca — Norte del Valle / Interior ─────────
     "cartago": {"aliases": ["cartago"], "department": "valle_del_cauca", "region": "pacifica"},
@@ -119,7 +120,7 @@ CITY_CATALOG = {
 
     # ── Atlántico — Barranquilla metropolitana ───────────────
     "soledad": {"aliases": ["soledad"], "department": "atlantico", "region": "caribe"},
-    "puerto colombia": {"aliases": ["puerto colombia"], "department": "atlantico", "region": "caribe"},
+    "puerto colombia": {"aliases": ["puerto colombia", "puerto", "villa campestre", "villacampestre", "sabanilla", "pradomar", "altos de pradomar", "portal de genoves"], "department": "atlantico", "region": "caribe"},
     "juan de acosta": {"aliases": ["juan de acosta"], "department": "atlantico", "region": "caribe"},
     "tubara": {"aliases": ["tubara"], "department": "atlantico", "region": "caribe"},
     "malambo": {"aliases": ["malambo"], "department": "atlantico", "region": "caribe"},
@@ -149,6 +150,7 @@ CITY_CATALOG = {
     # ── Caldas — Eje Cafetero ────────────────────────────────
     "villamaria": {"aliases": ["villamaria"], "department": "caldas", "region": "andina"},
     "palestina": {"aliases": ["palestina"], "department": "caldas", "region": "andina"},
+    "viterbo": {"aliases": ["viterbo"], "department": "caldas", "region": "andina"},
 
     # ── Tolima — Turismo / Tierra caliente ───────────────────
     "melgar": {"aliases": ["melgar"], "department": "tolima", "region": "andina"},
@@ -268,6 +270,7 @@ MARKET_CATALOG = {
         "el cerrito",
         "pradera",
         "florida_vc",
+        "calima",
     ],
     "norte_valle": [
         "cartago",
@@ -314,6 +317,7 @@ MARKET_CATALOG = {
         "villamaria",
         "palestina",
         "la dorada",
+        "viterbo",
     ],
     "turismo_tolima": [
         "melgar",

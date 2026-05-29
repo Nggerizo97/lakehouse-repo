@@ -102,13 +102,15 @@ location_tokens_udf = F.udf(_location_tokens, ArrayType(StringType()))
 
 
 def _normalizar_tipo(tipo_raw):
-    """396 variantes libres → 5 categorías limpias."""
+    """396 variantes libres → 6 categorías limpias."""
     if tipo_raw is None:
         return "otro"
     t = tipo_raw.lower().strip()
     if any(x in t for x in ["apto", "apart", "piso", "estudio", "loft", "penthouse", "duplex"]):
         return "apartamento"
-    if any(x in t for x in ["casa", "chalet", "villa", "finca", "cabana", "cabañ"]):
+    if any(x in t for x in ["finca", "cabana", "cabañ", "recreo"]):
+        return "finca"
+    if any(x in t for x in ["casa", "chalet", "villa"]):
         return "casa"
     if any(x in t for x in ["oficin", "consultori"]):
         return "oficina"
@@ -322,8 +324,15 @@ def assign_property_groups(df_prepared: DataFrame,
     on only the top-scoring edges, keeping at most max_group_size-1 edges per
     component.
     """
-    # Collect edges to driver — typically <100K pairs, trivial for Python
-    edges = df_pairs.select(
+    # Poda defensiva en Spark antes de collect:
+    # Retener como máximo los 5 emparejamientos con mayor score por cada inmueble individual.
+    # Evita que aristas y falsos positivos redundantes desborden la memoria del driver en Databricks.
+    from pyspark.sql.window import Window as _W
+    w_limit = _W.partitionBy("fuente_a", "id_a").orderBy(F.desc("match_score"))
+    df_pruned = df_pairs.withColumn("_rank", F.row_number().over(w_limit)).filter(F.col("_rank") <= 5).drop("_rank")
+
+    # Collect edges to driver — safe and lightweight to process in Python localmente
+    edges = df_pruned.select(
         F.concat_ws("||", F.col("fuente_a"), F.col("id_a")).alias("src"),
         F.concat_ws("||", F.col("fuente_b"), F.col("id_b")).alias("dst"),
         F.col("match_score").alias("score"),
