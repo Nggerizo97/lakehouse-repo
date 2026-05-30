@@ -10,21 +10,19 @@ __pycache__/
 *.pkl
 .lock
 
-## Datos locales y dumps
+## Datos locales y dumps de S3
 file/
 local_s3_dump/
+descarga_**/
 *.parquet
 *.csv
 *_dump.txt
 
-## Archivos temporales, scripts locales y asistentes
-.assistant
+## Archivos temporales de notebooks y scripts de reorganizacion
+gold_cell_*.py
 patch_*.py
 dump_*.py
-gold_cell_*.py
-inspect_bronze.py
-local_analytics.py
-dedup_cross_portal.py
+_patch_notebooks.py
 
 ## Otros
 .DS_Store
