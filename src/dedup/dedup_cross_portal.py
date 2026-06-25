@@ -33,38 +33,33 @@ def _safe_cache(df: DataFrame) -> DataFrame:
 # 1. NORMALIZACIÓN DE UBICACIÓN
 # ─────────────────────────────────────────────────────────────────
 
-def _remove_accents(text):
-    if text is None:
-        return None
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+def get_normalize_location_col(col):
+    """Limpia y normaliza ubicaciones usando funciones nativas de Spark."""
+    # 1. Quitar acentos (traducción simple de caracteres) y minúsculas
+    translated = F.translate(F.lower(col), "áéíóúüñ", "aeiouun")
+    # 2. Reemplazar ruido
+    no_noise = F.regexp_replace(translated, r"\b(d\.c\.|d\.c|dc|colombia|departamento|municipio)\b", "")
+    # 3. Cambiar puntuación por espacios
+    no_punc = F.regexp_replace(no_noise, r"[,\-–—/|·•()]+", " ")
+    # 4. Colapsar espacios múltiples y recortar bordes
+    return F.trim(F.regexp_replace(no_punc, r"\s+", " "))
 
 
-def _normalize_location(text):
-    if text is None:
-        return None
-    text = _remove_accents(text.lower().strip())
-    for noise in ["d.c.", "d.c", "dc", "colombia", "departamento", "municipio"]:
-        text = text.replace(noise, "")
-    text = re.sub(r"[,\-–—/|·•()]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-normalize_location_udf = F.udf(_normalize_location, StringType())
-
-
-def _extract_city_token(normalized_location):
-    if normalized_location is None:
-        return "otra_ciudad"
-
-    text = f" {normalized_location.strip()} "
+def get_extract_city_col(col):
+    """Extrae token de ciudad buscando en catálogos usando lógica when nativa de Spark."""
+    col_loc = F.concat(F.lit(" "), F.trim(col), F.lit(" "))
+    expr = None
+    
     for alias in SORTED_CITY_ALIASES:
-        if f" {alias} " in text:
-            return CITY_ALIAS_TO_CANONICAL.get(alias, alias)
-
+        canonical = CITY_ALIAS_TO_CANONICAL.get(alias, alias)
+        cond = col_loc.contains(f" {alias} ")
+        if expr is None:
+            expr = F.when(cond, F.lit(canonical))
+        else:
+            expr = expr.when(cond, F.lit(canonical))
+            
     # Fallback defensivo si no se pudo cargar el catálogo externo.
-    ciudades = {
+    fallback_cities = [
         "bogota", "medellin", "cali", "barranquilla", "cartagena",
         "bucaramanga", "pereira", "manizales", "cucuta", "ibague",
         "santa marta", "villavicencio", "pasto", "monteria", "neiva",
@@ -73,55 +68,51 @@ def _extract_city_token(normalized_location):
         "chia", "zipaquira", "cajica", "cota", "funza",
         "mosquera", "tocancipa", "la calera", "sopo",
         "rionegro", "girardot", "floridablanca", "piedecuesta",
-    }
-    for city in ciudades:
-        if city in normalized_location:
-            return city
-    return "otra_ciudad"
+    ]
+    for city in fallback_cities:
+        cond = col_loc.contains(city)
+        if expr is None:
+            expr = F.when(cond, F.lit(city))
+        else:
+            expr = expr.when(cond, F.lit(city))
+            
+    if expr is None:
+        return F.lit("otra_ciudad")
+    return expr.otherwise(F.lit("otra_ciudad"))
 
 
-extract_city_udf = F.udf(_extract_city_token, StringType())
+def get_map_city_market_col(col):
+    """Mapea ciudades a mercados usando transformaciones nativas."""
+    expr = None
+    for k, v in CITY_TO_MARKET.items():
+        cond = (col == k)
+        if expr is None:
+            expr = F.when(cond, F.lit(v))
+        else:
+            expr = expr.when(cond, F.lit(v))
+            
+    if expr is None:
+        return F.lit("mercado_otro")
+    return expr.otherwise(F.lit("mercado_otro"))
 
 
-def _map_city_market(city_token):
-    if city_token is None:
-        return "mercado_otro"
-    return CITY_TO_MARKET.get(city_token, "mercado_otro")
+def get_location_tokens_col(col):
+    """Crea un array de tokens eliminando aquellos de longitud menor a 3."""
+    return F.filter(F.split(col, " "), lambda x: F.length(x) > 2)
 
 
-map_city_market_udf = F.udf(_map_city_market, StringType())
-
-
-def _location_tokens(normalized_location):
-    if normalized_location is None:
-        return []
-    return [t for t in normalized_location.split() if len(t) > 2]
-
-
-location_tokens_udf = F.udf(_location_tokens, ArrayType(StringType()))
-
-
-def _normalizar_tipo(tipo_raw):
-    """396 variantes libres → 6 categorías limpias."""
-    if tipo_raw is None:
-        return "otro"
-    t = tipo_raw.lower().strip()
-    if any(x in t for x in ["apto", "apart", "piso", "estudio", "loft", "penthouse", "duplex"]):
-        return "apartamento"
-    if any(x in t for x in ["finca", "cabana", "cabañ", "recreo"]):
-        return "finca"
-    if any(x in t for x in ["casa", "chalet", "villa"]):
-        return "casa"
-    if any(x in t for x in ["oficin", "consultori"]):
-        return "oficina"
-    if any(x in t for x in ["local", "bodega", "comerci", "nave"]):
-        return "local_comercial"
-    if any(x in t for x in ["lote", "terreno", "parcela"]):
-        return "lote"
-    return "otro"
-
-
-normalizar_tipo_udf = F.udf(_normalizar_tipo, StringType())
+def get_normalizar_tipo_col(col):
+    """Clasifica tipos de inmueble en 6 categorías estándar."""
+    t = F.lower(F.trim(col))
+    return (
+        F.when(t.rlike("apto|apart|piso|estudio|loft|penthouse|duplex"), F.lit("apartamento"))
+        .when(t.rlike("finca|cabana|cabañ|recreo"), F.lit("finca"))
+        .when(t.rlike("casa|chalet|villa"), F.lit("casa"))
+        .when(t.rlike("oficin|consultori"), F.lit("oficina"))
+        .when(t.rlike("local|bodega|comerci|nave"), F.lit("local_comercial"))
+        .when(t.rlike("lote|terreno|parcela"), F.lit("lote"))
+        .otherwise(F.lit("otro"))
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -150,23 +141,23 @@ def prepare_for_matching(df_silver: DataFrame) -> DataFrame:
 
     return (
         df_silver
-        .withColumn("ubicacion_norm", normalize_location_udf(F.col("ubicacion_raw")))
+        .withColumn("ubicacion_norm", get_normalize_location_col(F.col("ubicacion_raw")))
         .withColumn(
             "city_token",
             F.when(
                 F.col("city_token").isNotNull() & (F.length(F.trim(F.col("city_token"))) > 0),
                 F.col("city_token")
-            ).otherwise(extract_city_udf(F.col("ubicacion_norm")))
+            ).otherwise(get_extract_city_col(F.col("ubicacion_norm")))
         )
         .withColumn(
             "market_token",
             F.when(
                 F.col("market_token").isNotNull() & (F.length(F.trim(F.col("market_token"))) > 0),
                 F.col("market_token")
-            ).otherwise(map_city_market_udf(F.col("city_token")))
+            ).otherwise(get_map_city_market_col(F.col("city_token")))
         )
-        .withColumn("location_tokens", location_tokens_udf(F.col("ubicacion_norm")))
-        .withColumn("tipo_inmueble", normalizar_tipo_udf(F.col("tipo_inmueble")))
+        .withColumn("location_tokens", get_location_tokens_col(F.col("ubicacion_norm")))
+        .withColumn("tipo_inmueble", get_normalizar_tipo_col(F.col("tipo_inmueble")))
         .withColumn("data_completeness",
             F.when(F.col("area_m2").isNotNull(), F.lit(1)).otherwise(F.lit(0)) +
             F.when(F.col("habitaciones").isNotNull(), F.lit(1)).otherwise(F.lit(0)) +
