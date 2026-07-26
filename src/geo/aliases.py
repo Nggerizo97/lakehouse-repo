@@ -83,7 +83,9 @@ MUNICIPIO_ALIASES = {
     "05129": ["caldas antioquia"],
     "05079": ["barbosa antioquia"],
     "68077": ["barbosa santander"],
-    "05674": ["san vicente ferrer", "san vicente antioquia"],
+    # "san vicente" a secas es como lo escriben los portales; sin este alias
+    # solo resolvia cuando el aviso nombraba el departamento.
+    "05674": ["san vicente", "san vicente ferrer", "san vicente antioquia"],
     "05400": ["la union antioquia"],
     "76400": ["la union valle"],
     "05148": ["el carmen de viboral", "carmen de viboral"],
@@ -159,6 +161,13 @@ MUNICIPIO_ALIASES = {
 # ══════════════════════════════════════════════════════════════════
 
 DEFAULT_PRIORITY = 10
+
+# Piso de prioridad para municipios que pertenecen a un mercado comercial
+# curado (MARKET_CATALOG). Debe quedar por encima de
+# STANDALONE_PRIORITY_FLOOR del resolver para que alias cortos como "sopo",
+# "nilo" o "cota" resuelvan sin necesidad de que el aviso nombre el
+# departamento.
+MARKET_MEMBER_PRIORITY = 55
 
 MUNICIPIO_PRIORITY = {
     # Capitales y mercados dominantes

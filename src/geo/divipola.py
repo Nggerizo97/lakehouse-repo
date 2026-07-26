@@ -25,6 +25,7 @@ from .aliases import (
     CODMPIO_TO_MARKET,
     DEFAULT_PRIORITY,
     DEPARTAMENTO_REGION,
+    MARKET_MEMBER_PRIORITY,
     MUNICIPIO_ALIASES,
     MUNICIPIO_PRIORITY,
 )
@@ -123,7 +124,22 @@ def build_dim_municipio(sheets: dict) -> pd.DataFrame:
     df["key_municipio"] = df["municipio"].map(normalize_text)
     df["region"] = df["cod_dpto"].map(DEPARTAMENTO_REGION).fillna("otra")
     df["market_token"] = df["cod_mpio"].map(CODMPIO_TO_MARKET).fillna("mercado_otro")
-    df["priority"] = df["cod_mpio"].map(MUNICIPIO_PRIORITY).fillna(DEFAULT_PRIORITY).astype(int)
+
+    # Prioridad: la explicita si existe; si no, un piso para los municipios
+    # que pertenecen a un mercado comercial curado.
+    #
+    # Ese piso importa porque el resolver exige corroboracion por departamento
+    # para alias cortos de un solo token, y sin el, municipios reales de 4
+    # letras como Sopo, Nilo o Cota quedaban sin resolver cuando el aviso no
+    # nombraba el departamento ("sopo incluye yerbabuena" -> otra_ciudad).
+    # Al estar en MARKET_CATALOG son plazas revisadas a mano, asi que
+    # aceptarlas sueltas no abre la puerta a falsos positivos.
+    market_floor = df["cod_mpio"].map(
+        lambda code: MARKET_MEMBER_PRIORITY if code in CODMPIO_TO_MARKET else DEFAULT_PRIORITY
+    )
+    explicit = df["cod_mpio"].map(MUNICIPIO_PRIORITY)
+    df["priority"] = explicit.fillna(market_floor).astype(int)
+    df["priority"] = df[["priority"]].join(market_floor.rename("floor")).max(axis=1).astype(int)
     # Capital departamental: en DIVIPOLA el codigo de capital termina en 001.
     df["es_capital"] = df["cod_mpio"].str.endswith("001")
     df = df.rename(columns={"latitud": "mpio_lat", "longitud": "mpio_lon"})

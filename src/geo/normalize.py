@@ -13,6 +13,14 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
 _SPACE_RE = re.compile(r"\s+")
 
 # Ruido que los portales anteponen o intercalan en el campo de ubicacion.
+#
+# OJO: "colombia" NO se elimina aqui. Al quitarlo, "Puerto Colombia" (08573)
+# quedaba reducido a "puerto" y dejaba de resolver: ~500 avisos del area
+# metropolitana de Barranquilla caian en otra_ciudad ("villa campestre
+# puerto", "puerto puerto", "punta roca sabanilla puerto").
+# El municipio homonimo "Colombia" (Huila) ya esta neutralizado por
+# ALIAS_BLOCKLIST en geo_resolver, y como palabra suelta la filtra
+# GEO_GENERIC_STOPWORDS al construir el nombre de barrio.
 _LOCATION_NOISE = (
     "distrito capital",
     "distrito especial",
@@ -21,7 +29,6 @@ _LOCATION_NOISE = (
     "departamento",
     "municipio de",
     "municipio",
-    "colombia",
 )
 
 
