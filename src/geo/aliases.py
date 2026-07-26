@@ -314,6 +314,31 @@ GEO_GENERIC_STOPWORDS = {
     "kilometro", "vereda", "corregimiento", "comuna", "localidad",
     "urbana", "rural", "colombia", "departamento", "municipio",
     "distrito", "capital", "especial", "metropolitana", "area",
+    "otro", "otra", "otros", "otras", "lejos", "sobre", "planos",
 }
 
-SECTOR_STOPWORDS = SPANISH_STOPWORDS | PROPERTY_STOPWORDS | GEO_GENERIC_STOPWORDS
+# Adjetivos y ganchos de marketing que sobreviven al filtro anterior porque
+# no son ni preposiciones ni sustantivos inmobiliarios, pero tampoco son
+# nombres de barrio. Sin esta lista aparecian candidatos como
+# "lejos nido" o "excelente ubicacion" en el selector de barrios.
+MARKETING_STOPWORDS = {
+    "excelente", "excelentes", "hermoso", "hermosa", "bonito", "bonita",
+    "amplio", "amplia", "amplios", "amplias", "moderno", "moderna",
+    "exclusivo", "exclusiva", "lujo", "lujoso", "lujosa", "acogedor",
+    "acogedora", "espectacular", "increible", "unico", "unica",
+    "espacioso", "espaciosa", "comodo", "comoda", "ideal", "perfecto",
+    "perfecta", "mejor", "mejores", "gran", "grande", "grandes",
+    "pequeno", "pequena", "nuevo", "nueva", "nuevos", "nuevas",
+    "oportunidad", "ganga", "rebajado", "negociable", "urge", "urgente",
+    "vista", "vistas", "panoramica", "iluminado", "iluminada",
+    "remodelado", "remodelada", "terminado", "terminada", "entrega",
+    "inmediata", "disponible", "ubicacion", "ubicado", "ubicada",
+    "nido", "sueno", "hogar", "familia", "familiar", "inversion",
+}
+
+SECTOR_STOPWORDS = (
+    SPANISH_STOPWORDS
+    | PROPERTY_STOPWORDS
+    | GEO_GENERIC_STOPWORDS
+    | MARKETING_STOPWORDS
+)
