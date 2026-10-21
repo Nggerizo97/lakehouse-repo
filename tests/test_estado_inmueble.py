@@ -18,6 +18,9 @@ CASES = [
     (None, "ciencuadras_nuevo", "Apartamento en Bogotá", "https://www.ciencuadras.com/proyecto/torres-del-parque/123", "nuevo"),
     (None, "ciencuadras_nuevo", "Apartamento en Chía", None, "nuevo"),
     (None, "ciencuadras_usado", "Apartamento en Bogotá", "https://www.ciencuadras.com/inmueble/apartamento-en-venta/1", "usado"),
+    # Secciones de proyectos de FincaRaíz y Metrocuadrado
+    (None, "fincaraiz_proyectos", "Palma, apartamento en venta en el poblado, medellín", None, "nuevo"),
+    (None, "metrocuadrado_proyectos", "CITIZEN - Apartamento en Venta, EL VERGEL, Bogotá D.C.", None, "nuevo"),
     # El titulo refina la seccion
     (None, "ciencuadras_nuevo", "Proyecto sobre planos en Cajicá", None, "sobre_planos"),
     # Frases en titulo/URL de portales mixtos

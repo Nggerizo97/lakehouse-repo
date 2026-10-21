@@ -38,6 +38,8 @@ ESTADO_DESCONOCIDO = "desconocido"
 SOURCE_DEFAULT_ESTADO = {
     "ciencuadras_nuevo": ESTADO_NUEVO,
     "ciencuadras_usado": ESTADO_USADO,
+    "fincaraiz_proyectos": ESTADO_NUEVO,
+    "metrocuadrado_proyectos": ESTADO_NUEVO,
 }
 
 # El orden importa: "proyecto nuevo sobre planos" es sobre_planos, no nuevo.

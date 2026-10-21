@@ -13,8 +13,10 @@ SOURCE_PRICE_RULES = {
     "ciencuadras_usado": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "facebook": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "fincaraiz": {"min_price": 20_000_000, "max_price": 20_000_000_000},
+    "fincaraiz_proyectos": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "mercadolibre": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "metrocuadrado": {"min_price": 20_000_000, "max_price": 20_000_000_000},
+    "metrocuadrado_proyectos": {"min_price": 20_000_000, "max_price": 20_000_000_000},
     "properati": {"min_price": 20_000_000, "max_price": 20_000_000_000},
 }
 
@@ -25,7 +27,9 @@ SOURCE_REQUIRED_SIGNALS = {
     "ciencuadras_usado": ["id_inmueble", "title", "precio_num"],
     "facebook": ["id_inmueble", "title"],
     "fincaraiz": ["id_inmueble", "title", "precio_num"],
+    "fincaraiz_proyectos": ["id_inmueble", "titulo", "precio_num"],
     "mercadolibre": ["id_inmueble", "title", "price"],
     "metrocuadrado": ["id_inmueble", "title", "precio_num"],
+    "metrocuadrado_proyectos": ["id_inmueble", "titulo", "precio_num"],
     "properati": ["id_inmueble", "title", "precio_num"],
 }
