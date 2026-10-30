@@ -1,5 +1,65 @@
 import pandas as pd
 import numpy as np
+
+from src.geo.normalize import BARRIO_OTRO, BLANK_MARKERS, barrio_key
+
+BARRIO_NUM_FEATURES = [
+    "precio_m2_mediano_barrio", "precio_estimado_barrio_area", "barrio_vs_ciudad_ratio",
+]
+
+
+def _barrio_nombre(frame: pd.DataFrame) -> pd.Series:
+    """Barrio oficial DIVIPOLA o, si falta, el texto libre. Igual que en 04."""
+    def limpio(col):
+        if col not in frame.columns:
+            return pd.Series("", index=frame.index)
+        texto = frame[col].astype(str).str.strip()
+        return texto.mask(texto.str.lower().isin(BLANK_MARKERS), "")
+
+    oficial, texto = limpio("barrio"), limpio("barrio_texto")
+    return oficial.where(oficial.ne(""), texto)
+
+
+def add_barrio_features(frame: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    """Features de barrio con la misma regla que 04_Model_Training.
+
+    Antes este scorer no las calculaba: barrio_key llegaba como "desconocido"
+    y las medianas de barrio como 0.0. La llave sale de
+    src.geo.normalize.barrio_key y las medianas de bundle["barrio_stats"], la
+    tabla que alimento la feature en el entrenamiento. Un barrio que el modelo
+    no conoce pasa a barrio_otro y toma la mediana de su ciudad, igual que en
+    el entrenamiento; `barrio_en_modelo` deja constancia de cada caso.
+    Requiere precio_m2_mediano_ciudad ya calculado.
+    """
+    stats = bundle.get("barrio_stats")
+    if isinstance(stats, list):
+        stats = pd.DataFrame(stats)
+    if stats is not None and not stats.empty and "barrio_key" in stats.columns:
+        medianas = stats.drop_duplicates("barrio_key").set_index("barrio_key")["precio_m2_mediano_barrio"]
+    else:
+        medianas = pd.Series(dtype=float)
+
+    nombres = _barrio_nombre(frame)
+    keys = pd.Series(
+        [barrio_key(ciudad, barrio) for ciudad, barrio in zip(frame["city_token"], nombres)],
+        index=frame.index,
+    )
+    frame = frame.drop(columns=[c for c in ["barrio_key", "barrio_en_modelo", *BARRIO_NUM_FEATURES]
+                                if c in frame.columns])
+
+    conocido = keys.isin(medianas.index)
+    frame["barrio_en_modelo"] = conocido & keys.ne(BARRIO_OTRO)
+    frame["barrio_key"] = keys.where(conocido, BARRIO_OTRO)
+    frame["precio_m2_mediano_barrio"] = (
+        frame["barrio_key"].map(medianas).fillna(frame["precio_m2_mediano_ciudad"])
+    )
+    frame["precio_estimado_barrio_area"] = frame["area_m2"] * frame["precio_m2_mediano_barrio"]
+    frame["barrio_vs_ciudad_ratio"] = (
+        frame["precio_m2_mediano_barrio"] / frame["precio_m2_mediano_ciudad"].replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    return frame
+
+
 def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     """Aplica el bundle_v3 al dataframe completo."""
     if bundle is None:
@@ -48,9 +108,13 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
                 df_pred[col] = default
             df_pred[col] = df_pred[col].fillna(default).astype(str)
 
-        text_cols = [c for c in ["ubicacion_norm", "ubicacion_clean", "titulo"] if c in df_pred.columns]
+        # Mismas columnas y orden que cols_text_candidates en 04_Model_Training.
+        # Antes faltaban zona_mercado ("Medellín | La América") y ubicacion_raw,
+        # justo las que llevan el barrio al TF-IDF.
+        text_cols = [c for c in ["ubicacion_norm", "zona_mercado", "ubicacion_raw", "titulo"]
+                     if c in df_pred.columns]
         if text_cols:
-            df_pred["texto_completo"] = df_pred[text_cols].fillna("").agg(" ".join, axis=1)
+            df_pred["texto_completo"] = df_pred[text_cols].fillna("").astype(str).agg(" ".join, axis=1)
         else:
             df_pred["texto_completo"] = ""
 
@@ -133,7 +197,15 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
         df_pred["ajuste_fuente_pct"] = (df_pred["fuente_segmento_factor"] - 1.0) * 100.0
 
+        df_pred = add_barrio_features(df_pred, bundle)
+
         feature_cols = bundle.get("feature_cols", [])
+        if "barrio_key" in feature_cols:
+            con_nombre = _barrio_nombre(df_pred).ne("")
+            print(
+                f"   barrio: {df_pred['barrio_en_modelo'].mean() * 100:.1f}% de filas con un "
+                f"barrio que el modelo conoce ({con_nombre.mean() * 100:.1f}% traen barrio)"
+            )
         if not feature_cols:
             feature_cols = [
                 "area_m2", "log_area_m2", "habitaciones", "banos", "garajes",
