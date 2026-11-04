@@ -16,6 +16,8 @@ local_s3_dump/
 descarga_**/
 *.parquet
 *.csv
+# Catalogo de referencia versionado (tools/build_barrios_postales.py)
+!reference/barrios_postales_4_72.csv
 *_dump.txt
 
 ## Archivos temporales de notebooks y scripts de reorganizacion

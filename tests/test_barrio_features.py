@@ -17,7 +17,7 @@ sys.path.insert(0, ROOT)
 
 import pandas as pd  # noqa: E402
 
-from src.geo.normalize import BARRIO_OTRO, barrio_key  # noqa: E402
+from src.geo.normalize import BARRIO_OTRO, ZONA_POSTAL_OTRA, barrio_key, zona_postal_key  # noqa: E402
 from src.ml.scorer import add_barrio_features  # noqa: E402
 
 
@@ -45,7 +45,10 @@ BUNDLE = {
     "barrio_stats": [
         {"barrio_key": "medellin | la america", "precio_m2_mediano_barrio": 6.0e6, "n_barrio": 40},
         {"barrio_key": "medellin | fonqueta", "precio_m2_mediano_barrio": 3.0e6, "n_barrio": 12},
-    ]
+    ],
+    "zona_postal_stats": [
+        {"zona_postal_key": "050021", "precio_m2_mediano_zona_postal": 9.0e6, "n_zona_postal": 300},
+    ],
 }
 
 
@@ -78,5 +81,37 @@ def test_entrenamiento_baja_la_columna_barrio_del_gold():
     codigo = next(c for c in celdas if "all_cols = list(dict.fromkeys(" in c)
     select = codigo.split("all_cols = list(dict.fromkeys(", 1)[1].split("))", 1)[0]
     assert "barrio_cols" in select
-    assert 'barrio_cols = [c for c in ["barrio", "barrio_texto"] if c in available]' in codigo
+    definicion = codigo.split("barrio_cols = [c for c in [", 1)[1].split("]", 1)[0]
+    for columna in ('"barrio"', '"barrio_texto"', '"codigo_postal"'):
+        assert columna in definicion, columna
     assert "from src.geo.normalize import barrio_key" in codigo
+    assert "zona_postal_key as _zona_postal_key" in codigo
+
+
+def test_zona_postal_key():
+    assert zona_postal_key("050021") == "050021"
+    assert zona_postal_key(50021) == "050021"        # leido como numero
+    assert zona_postal_key("50021.0") == "050021"
+    for vacio in [None, "", "nan", "5001", "zona"]:
+        assert zona_postal_key(vacio) == ZONA_POSTAL_OTRA
+
+
+def test_barrio_desconocido_usa_su_zona_postal_antes_que_la_ciudad():
+    con_zona = add_barrio_features(_frame(barrio=["Castropol"], codigo_postal=["050021"]), BUNDLE).iloc[0]
+    assert not con_zona["barrio_en_modelo"]
+    assert con_zona["precio_m2_mediano_zona_postal"] == 9.0e6
+    assert con_zona["precio_m2_mediano_barrio"] == 9.0e6        # barrio -> zona postal
+    sin_zona = add_barrio_features(_frame(barrio=["Castropol"], codigo_postal=["999999"]), BUNDLE).iloc[0]
+    assert sin_zona["precio_m2_mediano_barrio"] == 5.0e6        # zona desconocida -> ciudad
+
+
+def test_barrio_conocido_no_cambia_por_la_zona():
+    r = add_barrio_features(_frame(barrio=["La América"], codigo_postal=["050021"]), BUNDLE).iloc[0]
+    assert r["precio_m2_mediano_barrio"] == 6.0e6
+    assert r["precio_m2_mediano_zona_postal"] == 9.0e6
+
+
+def test_bundle_sin_zonas_se_comporta_como_antes():
+    viejo = {"barrio_stats": BUNDLE["barrio_stats"]}
+    r = add_barrio_features(_frame(barrio=["Castropol"], codigo_postal=["050021"]), viejo).iloc[0]
+    assert r["precio_m2_mediano_barrio"] == 5.0e6
