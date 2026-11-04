@@ -165,6 +165,24 @@ def test_codigo_postal_del_barrio_oficial():
     assert _resolve("Bogotá")["codigo_postal"] is None
 
 
+def test_barrio_de_la_semilla_hereda_codigo_postal_del_vecino_oficial():
+    import pandas as pd
+    from src.geo.divipola import _completar_codigo_postal
+
+    df = pd.DataFrame([
+        {"cod_mpio": "05001", "origen": "4-72", "nivel": "barrio", "latitud": 6.2095, "longitud": -75.5670, "codigo_postal": "050021"},
+        {"cod_mpio": "05001", "origen": "4-72", "nivel": "barrio", "latitud": 6.2500, "longitud": -75.5900, "codigo_postal": "050031"},
+        {"cod_mpio": "05001", "origen": "semilla", "nivel": "barrio", "latitud": 6.2093, "longitud": -75.5680, "codigo_postal": None},
+        {"cod_mpio": "05001", "origen": "semilla", "nivel": "barrio", "latitud": 6.3500, "longitud": -75.5000, "codigo_postal": None},
+        {"cod_mpio": "05001", "origen": "semilla", "nivel": "comuna", "latitud": 6.2095, "longitud": -75.5670, "codigo_postal": None},
+    ])
+    out = _completar_codigo_postal(df)["codigo_postal"].tolist()
+    assert out[2] == "050021"      # a ~100 m del barrio oficial
+    assert out[3] is None          # a mas de 1,5 km: no se adivina
+    assert out[4] is None          # una comuna abarca varios codigos
+    assert _resolve("Medellín, El Poblado, Provenza")["codigo_postal"].startswith("0500")
+
+
 def test_ciudad_principal_en_el_titulo_no_es_barrio():
     got = _resolve("Chía, Cundinamarca", "Apartamento en venta cerca a Bogotá")
     assert got["municipio"] == "Chía"
