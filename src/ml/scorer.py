@@ -1,10 +1,13 @@
 import pandas as pd
 import numpy as np
 
-from src.geo.normalize import BARRIO_OTRO, BLANK_MARKERS, barrio_key
+from src.geo.normalize import (
+    BARRIO_OTRO, BLANK_MARKERS, ZONA_POSTAL_OTRA, barrio_key, zona_postal_key,
+)
 
 BARRIO_NUM_FEATURES = [
     "precio_m2_mediano_barrio", "precio_estimado_barrio_area", "barrio_vs_ciudad_ratio",
+    "precio_m2_mediano_zona_postal",
 ]
 
 
@@ -27,8 +30,9 @@ def add_barrio_features(frame: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     y las medianas de barrio como 0.0. La llave sale de
     src.geo.normalize.barrio_key y las medianas de bundle["barrio_stats"], la
     tabla que alimento la feature en el entrenamiento. Un barrio que el modelo
-    no conoce pasa a barrio_otro y toma la mediana de su ciudad, igual que en
-    el entrenamiento; `barrio_en_modelo` deja constancia de cada caso.
+    no conoce pasa a barrio_otro y toma la mediana de su zona postal (columna
+    codigo_postal, tabla bundle["zona_postal_stats"]) y, si no, la de su
+    ciudad, igual que en el entrenamiento; `barrio_en_modelo` deja constancia.
     Requiere precio_m2_mediano_ciudad ya calculado.
     """
     stats = bundle.get("barrio_stats")
@@ -38,20 +42,35 @@ def add_barrio_features(frame: pd.DataFrame, bundle: dict) -> pd.DataFrame:
         medianas = stats.drop_duplicates("barrio_key").set_index("barrio_key")["precio_m2_mediano_barrio"]
     else:
         medianas = pd.Series(dtype=float)
+    zonas = bundle.get("zona_postal_stats")
+    if isinstance(zonas, list):
+        zonas = pd.DataFrame(zonas)
+    if zonas is not None and not zonas.empty and "zona_postal_key" in zonas.columns:
+        medianas_zona = (zonas.drop_duplicates("zona_postal_key")
+                         .set_index("zona_postal_key")["precio_m2_mediano_zona_postal"])
+    else:
+        medianas_zona = pd.Series(dtype=float)
 
     nombres = _barrio_nombre(frame)
     keys = pd.Series(
         [barrio_key(ciudad, barrio) for ciudad, barrio in zip(frame["city_token"], nombres)],
         index=frame.index,
     )
-    frame = frame.drop(columns=[c for c in ["barrio_key", "barrio_en_modelo", *BARRIO_NUM_FEATURES]
-                                if c in frame.columns])
+    zkeys = (frame["codigo_postal"].map(zona_postal_key) if "codigo_postal" in frame.columns
+             else pd.Series(ZONA_POSTAL_OTRA, index=frame.index))
+    frame = frame.drop(columns=[c for c in ["barrio_key", "barrio_en_modelo", "zona_postal_key",
+                                            *BARRIO_NUM_FEATURES] if c in frame.columns])
 
     conocido = keys.isin(medianas.index)
     frame["barrio_en_modelo"] = conocido & keys.ne(BARRIO_OTRO)
     frame["barrio_key"] = keys.where(conocido, BARRIO_OTRO)
+    # Respaldo en cadena, como en 04: barrio -> zona postal -> ciudad.
+    frame["zona_postal_key"] = zkeys.where(zkeys.isin(medianas_zona.index), ZONA_POSTAL_OTRA)
+    frame["precio_m2_mediano_zona_postal"] = (
+        frame["zona_postal_key"].map(medianas_zona).fillna(frame["precio_m2_mediano_ciudad"])
+    )
     frame["precio_m2_mediano_barrio"] = (
-        frame["barrio_key"].map(medianas).fillna(frame["precio_m2_mediano_ciudad"])
+        frame["barrio_key"].map(medianas).fillna(frame["precio_m2_mediano_zona_postal"])
     )
     frame["precio_estimado_barrio_area"] = frame["area_m2"] * frame["precio_m2_mediano_barrio"]
     frame["barrio_vs_ciudad_ratio"] = (
