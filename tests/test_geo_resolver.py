@@ -122,6 +122,55 @@ def test_dane_codes_are_wellformed():
     assert got["cod_mpio"] == "11001"
 
 
+# (ubicacion, barrio esperado, barrio_zona esperada o None). Usa el catalogo
+# 4-72 de reference/barrios_postales_4_72.csv que build_all suma a dim_barrio.
+BARRIO_OFICIAL_CASES = [
+    # Barrios que se llaman como un municipio de otro departamento: antes se
+    # descartaban como "contexto" y el aviso quedaba sin barrio.
+    ("Barranquilla, Comuna 19, Andalucia", "andalucia", None),
+    ("La Cumbre, Barranquilla", "la cumbre", None),
+    ("Barranquilla, Comuna 19, Betania", "betania", None),
+    # El barrio gana sobre la comuna o localidad, que pasa a barrio_zona.
+    ("Medellín, El Poblado, Provenza", "provenza", "el poblado"),
+    ("Medellín, Laureles, Conquistadores", "conquistadores", "laureles"),
+    ("Bogotá, Usaquén, Cedritos", "cedritos", "usaquen"),
+    ("Bogotá, Chapinero, Rosales", "rosales", "chapinero"),
+    # Sola, la comuna sigue siendo el barrio.
+    ("Medellín, El Poblado", "el poblado", None),
+    # Mismo nombre con otro corte de palabras.
+    ("Cartagena de Indias, Bocagrande", "boca grande", None),
+    ("Castillo Grande, Cartagena", "castillogrande", None),
+    # Veredas de municipios sin barrios oficiales.
+    ("Chía, Fonquetá", "fonqueta", None),
+    ("Vereda Yerbabuena, Chía", "yerbabuena", None),
+]
+
+
+def test_barrio_oficial_y_zona():
+    from src.geo.normalize import normalize_text
+
+    failures = []
+    for ubicacion, barrio, zona in BARRIO_OFICIAL_CASES:
+        got = _resolve(ubicacion)
+        if normalize_text(got.get("barrio")) != barrio:
+            failures.append(f"{ubicacion!r} -> barrio={got.get('barrio')!r} (esperado {barrio!r})")
+        elif zona and normalize_text(got.get("barrio_zona")) != zona:
+            failures.append(f"{ubicacion!r} -> barrio_zona={got.get('barrio_zona')!r} (esperado {zona!r})")
+    assert not failures, "\n".join(failures)
+
+
+def test_codigo_postal_del_barrio_oficial():
+    got = _resolve("Bogotá, Usaquén, Cedritos")
+    assert got["codigo_postal"] and got["codigo_postal"].startswith("11")
+    assert _resolve("Bogotá")["codigo_postal"] is None
+
+
+def test_ciudad_principal_en_el_titulo_no_es_barrio():
+    got = _resolve("Chía, Cundinamarca", "Apartamento en venta cerca a Bogotá")
+    assert got["municipio"] == "Chía"
+    assert "bogota" not in (got.get("barrio_texto") or "")
+
+
 def test_empty_input_is_safe():
     for value in (None, "", "   ", "nan"):
         got = _resolve(value)
