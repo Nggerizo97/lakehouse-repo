@@ -1,3 +1,5 @@
+import traceback
+
 import pandas as pd
 import numpy as np
 
@@ -248,83 +250,52 @@ def score_dataframe(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
         X = df_pred[feature_cols].copy()
 
-        # --- LÓGICA DE PREDICCIÓN (Safe-Load Hybrid) ---
-        import xgboost as xgb
+        # --- LÓGICA DE PREDICCIÓN ---
+        # El bundle llega en dos formas y ambas deben funcionar:
+        # - 05_Batch_Inference lo entrega ya cargado: "model"/"booster" es el
+        #   xgb.Booster y "preprocessor" el ColumnTransformer deserializado.
+        # - El JSON crudo de 04 trae "model_json" y "preprocessor_pickle".
+        # Antes solo se leia la segunda: con el bundle de 05 caia al respaldo
+        # "pickle", que llamaba Booster.predict(DataFrame) y fallaba con
+        # "Expecting data to be a DMatrix object", tapando la causa real.
         import pickle
-        import io
-        import traceback
 
-        # 1. Cargar el preprocesador (Punto de fallo por versión de sklearn)
-        preprocessor = None
-        preprocessor_blob = bundle.get("preprocessor_pickle")
-        if preprocessor_blob:
-            try:
-                # Si viene como str (poco probable en v8_unified pero posible en migraciones), convertir a bytes
-                if isinstance(preprocessor_blob, str):
-                    preprocessor_blob = preprocessor_blob.encode('latin1')
-                preprocessor = pickle.loads(preprocessor_blob)
-            except Exception as e_prep:
-                print(f"⚠️ Error deserializando preprocesador: {e_prep}")
-        
-        if preprocessor is None:
-            # Fallback legacy
-            old_pipe = bundle.get("model")
-            if hasattr(old_pipe, 'named_steps'):
-                preprocessor = old_pipe.named_steps.get('preprocessor')
+        import xgboost as xgb
 
-        # 2. Cargar el Booster nativo
-        model_json = bundle.get("model_json")
-        if model_json:
-            try:
-                bst = xgb.Booster()
-                if isinstance(model_json, str):
-                    model_json = model_json.encode('utf-8')
-                bst.load_model(bytearray(model_json))
-                
-                if preprocessor:
-                    X_proc = preprocessor.transform(X)
-                else:
-                    raise ValueError("Preprocesador no disponible (Version mismatch o carga fallida)")
-                
-                # Asegurar formato DMatrix (soporta sparse)
-                dtrain = xgb.DMatrix(X_proc)
-                precio_pred = bst.predict(dtrain)
-                
-                # Inverse Log Transform (v8 siempre entrena en log1p)
-                precio_pred = np.expm1(precio_pred)
-                
-                # 🚨 FIX: Si el modelo es residual, multiplicar por el baseline
-                if strategy == "residual":
-                    baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
-                    precio_pred = precio_pred * baseline.to_numpy()
-                
-            except Exception as e_xgb:
-                # Si falla el booster, intentamos fallback a pickle si existe
-                print(f"⚠️ Error en Booster nativo: {e_xgb}")
-                pipeline = bundle.get("model")
-                if pipeline:
-                    precio_pred = pipeline.predict(X)
-                    if hasattr(pipeline, 'named_steps') and strategy != "residual": # TTR maneja el log solo
-                         pass
-                    else:
-                         precio_pred = np.expm1(precio_pred)
-                         if strategy == "residual":
-                             baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
-                             precio_pred = precio_pred * baseline.to_numpy()
-                else:
-                    raise e_xgb
-        else:
-            # Fallback total a Pickle
-            pipeline = bundle.get("model")
-            if pipeline is None:
-                 raise ValueError("No hay modelo (JSON ni Pickle) disponible en el bundle.")
-            
+        preprocessor = next(
+            (bundle[k] for k in ("preprocessor", "_preprocessor") if bundle.get(k) is not None), None
+        )
+        if preprocessor is None and bundle.get("preprocessor_pickle"):
+            blob = bundle["preprocessor_pickle"]
+            preprocessor = pickle.loads(blob.encode("latin1") if isinstance(blob, str) else blob)
+        if preprocessor is None and hasattr(bundle.get("model"), "named_steps"):
+            preprocessor = bundle["model"].named_steps.get("preprocessor")  # Pipeline legacy
+
+        bst = next(
+            (m for m in (bundle.get("booster"), bundle.get("model")) if isinstance(m, xgb.Booster)), None
+        )
+        if bst is None and bundle.get("model_json"):
+            model_json = bundle["model_json"]
+            bst = xgb.Booster()
+            bst.load_model(bytearray(model_json.encode("utf-8") if isinstance(model_json, str) else model_json))
+
+        if bst is not None:
+            if preprocessor is None:
+                raise ValueError("El bundle trae el Booster pero no el preprocesador.")
+            # v8 siempre entrena sobre log1p(precio)
+            precio_pred = np.expm1(bst.predict(xgb.DMatrix(preprocessor.transform(X))))
             if strategy == "residual":
-                pred_ratio = pipeline.predict(X)
                 baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
-                precio_pred = pred_ratio * baseline.to_numpy()
-            else:
-                precio_pred = pipeline.predict(X)
+                precio_pred = precio_pred * baseline.to_numpy()
+        else:
+            # Bundle legacy en pickle: Pipeline de sklearn completo.
+            pipeline = bundle.get("model")
+            if pipeline is None or not hasattr(pipeline, "predict"):
+                raise ValueError("No hay modelo (Booster, JSON ni Pipeline) en el bundle.")
+            precio_pred = pipeline.predict(X)
+            if strategy == "residual":
+                baseline = df_pred["precio_estimado_segmento_area_ajustado"].fillna(global_price_median)
+                precio_pred = precio_pred * baseline.to_numpy()
 
         df["precio_predicho"] = precio_pred
         df["rentabilidad_potencial"] = (
