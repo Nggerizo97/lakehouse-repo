@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Catalogo barrio -> codigo postal de 4-72 (tools/build_barrios_postales.py).
+"""Catalogo de barrios y veredas de 4-72 (tools/build_barrios_postales.py).
 
 Ejecutar:  python -m pytest tests/test_barrios_postales.py -q
 """
@@ -9,10 +9,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 
 from tools.build_barrios_postales import (  # noqa: E402
-    LIMITE_CAMPO, clave_base, codigo_municipio, construir, reconstruir_codigo_postal, separar_lista,
+    FUENTE_CAPA, FUENTE_LISTA, LIMITE_CAMPO, IndiceCodigoPostal, clave_base, codigo_municipio,
+    combinar, es_generico, filas_capa, filas_lista, localidades_bogota, reconstruir_codigo_postal,
+    separar_lista,
 )
 
 
@@ -58,23 +61,90 @@ def test_clave_base_tolera_variantes_sin_fusionar_barrios(oficial, base):
     assert clave_base(oficial) == base
 
 
-def test_construir_agrupa_un_barrio_en_varios_codigos():
-    registros = [
-        {"codigo_municipio": "5001", "nombre_municipio": "MEDELLIN", "codigo_postal": "50.014", "tipo": "Urbano",
-         "barrios_contenidos_en_el": "Calle Nueva- Guayabal", "veredas_contenidas_en_el": "Sin Informacion de Veredas"},
-        {"codigo_municipio": "5001", "nombre_municipio": "MEDELLIN", "codigo_postal": "50.015", "tipo": "Urbano",
-         "barrios_contenidos_en_el": "Calle Nueva", "veredas_contenidas_en_el": "Sin Informacion de Veredas"},
-    ]
-    df = construir(registros)
-    calle = df[df["key_barrio"] == "calle nueva"].iloc[0]
-    assert len(df) == 2
-    assert calle["codigo_postal"] == "050014"
-    assert calle["codigos_postales"] == "050014|050015"
-    assert calle["cod_mpio"] == "05001"
+def test_nombres_de_relleno():
+    assert es_generico("Sin Definir")
+    assert es_generico("CABECERA MUNICIPAL")
+    assert not es_generico("Centro")
 
 
-def test_codigo_postal_de_otro_departamento_es_error():
-    registro = {"codigo_municipio": "5001", "codigo_postal": "110.111",
-                "barrios_contenidos_en_el": "X Y Z", "veredas_contenidas_en_el": None}
+def _registro(cod_mpio, cp, barrios, nombre="MEDELLIN", veredas="Sin Informacion de Veredas"):
+    return {"codigo_municipio": cod_mpio, "nombre_municipio": nombre, "codigo_postal": cp,
+            "barrios_contenidos_en_el": barrios, "veredas_contenidas_en_el": veredas}
+
+
+def test_lista_descarta_genericos_y_valida_departamento():
+    df = filas_lista([_registro("5001", "50.014", "Calle Nueva- Sin Definir- Guayabal")])
+    assert df["nombre"].tolist() == ["Calle Nueva", "Guayabal"]
     with pytest.raises(ValueError):
-        construir([registro])
+        filas_lista([_registro("5001", "110.111", "X Y Z")])
+
+
+def test_localidad_de_bogota_por_codigo_postal():
+    registros = [_registro("11001", "110.111", "Santa Barbara", nombre="LOCALIDAD USAQUEN"),
+                 _registro("5001", "50.021", "El Poblado")]
+    assert localidades_bogota(registros) == {"110111": "Usaquen"}
+
+
+def _cuadrado(x, y, lado=1.0):
+    return {"rings": [[[x, y], [x + lado, y], [x + lado, y + lado], [x, y + lado], [x, y]]]}
+
+
+def test_capa_asigna_codigo_postal_y_coordenadas_por_poligono():
+    cps = [{"attributes": {"Codigo_Postal": "050021"}, "geometry": _cuadrado(0, 0, 10)},
+           {"attributes": {"Codigo_Postal": "050031"}, "geometry": _cuadrado(10, 0, 10)}]
+    barrios = [
+        {"attributes": {"Nombre": "Provenza", "MunicipioID": "10339", "ComunaID": "14", "Codigo": "1"},
+         "geometry": _cuadrado(2, 2)},
+        {"attributes": {"Nombre": "Laureles", "MunicipioID": "10339", "ComunaID": "0", "Codigo": "2"},
+         "geometry": _cuadrado(12, 2)},
+        {"attributes": {"Nombre": "Sin Definir", "MunicipioID": "10339"}, "geometry": _cuadrado(3, 3)},
+    ]
+    df = filas_capa(barrios, "barrio", {"10339": "05001"}, IndiceCodigoPostal(cps))
+    assert df["nombre"].tolist() == ["Provenza", "Laureles"]
+    assert df["codigo_postal"].tolist() == ["050021", "050031"]
+    assert df["cod_mpio"].tolist() == ["05001", "05001"]
+    assert df["comuna_id_4_72"].tolist() == ["14", None]  # "0" es "sin comuna"
+    assert 2 < df["lon"].iloc[0] < 3 and 2 < df["lat"].iloc[0] < 3
+
+
+def test_vereda_usa_codigo_dane_si_el_id_interno_falta():
+    cps = [{"attributes": {"Codigo_Postal": "250001"}, "geometry": _cuadrado(0, 0, 10)}]
+    veredas = [{"attributes": {"Nombre": "Fonquetá", "MunicipioID": None, "Codigo_DANE": "25175"},
+                "geometry": _cuadrado(1, 1)}]
+    df = filas_capa(veredas, "vereda", {}, IndiceCodigoPostal(cps))
+    assert df.iloc[0]["cod_mpio"] == "25175"
+
+
+def test_vereda_con_codigo_dane_de_relleno_y_codigo_postal_de_otro_departamento():
+    cps = [{"attributes": {"Codigo_Postal": "445008"}, "geometry": _cuadrado(0, 0, 10)}]
+    veredas = [{"attributes": {"Nombre": "El Morro", "MunicipioID": "99", "Codigo_DANE": "0000 "},
+                "geometry": _cuadrado(1, 1)}]
+    df = filas_capa(veredas, "vereda", {"99": "20013"}, IndiceCodigoPostal(cps))
+    assert df.iloc[0]["cod_mpio"] == "20013"      # el relleno no se usa como municipio
+    assert df.iloc[0]["codigo_postal"] is None    # 445008 es de La Guajira, no del Cesar
+
+
+def test_combinar_prefiere_la_capa_y_suma_lo_que_solo_esta_en_la_lista():
+    capa = pd.DataFrame([
+        {"cod_mpio": "05001", "nivel": "barrio", "nombre": "Calle Nueva", "codigo_postal": "050014",
+         "comuna_id_4_72": "15", "lat": 6.2, "lon": -75.6, "codigo_4_72": "9", "fuente": FUENTE_CAPA,
+         "lista_truncada": False},
+        {"cod_mpio": None, "nivel": "vereda", "nombre": "Yerbabuena", "codigo_postal": "250001",
+         "comuna_id_4_72": None, "lat": 4.8, "lon": -74.0, "codigo_4_72": "7", "fuente": FUENTE_CAPA,
+         "lista_truncada": False},
+    ])
+    lista = pd.DataFrame([
+        {"cod_mpio": "05001", "nivel": "barrio", "nombre": "CALLE NUEVA", "codigo_postal": "050015",
+         "fuente": FUENTE_LISTA, "lista_truncada": False},
+        {"cod_mpio": "05001", "nivel": "barrio", "nombre": "Guayabal", "codigo_postal": "050023",
+         "fuente": FUENTE_LISTA, "lista_truncada": True},
+    ])
+    df = combinar(capa, lista, {"250001": "25175"}, {})
+    calle = df[df["key_barrio"] == "calle nueva"].iloc[0]
+    assert len(df) == 3
+    assert calle["nombre"] == "Calle Nueva" and calle["lat"] == 6.2
+    assert calle["codigos_postales"] == "050014|050015"
+    assert FUENTE_CAPA in calle["fuente"] and FUENTE_LISTA in calle["fuente"]
+    assert df[df["key_barrio"] == "guayabal"].iloc[0]["lista_truncada"]
+    # Vereda sin municipio en la capa: se toma el del codigo postal.
+    assert df[df["key_barrio"] == "yerbabuena"].iloc[0]["cod_mpio"] == "25175"
